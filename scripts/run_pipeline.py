@@ -7,9 +7,10 @@ Ordem:
   3) ingestão de salários oficiais (Bronze)
   4) processamento Silver (vagas, custos e salários)
   5) enriquecimento NOC/senioridade das vagas
-  6) dbt run (Gold)
-  7) publicação do Gold canônico em Parquet (local + S3)
-  8) validação rápida do Gold
+  6) pesquisa salarial com fonte verificável
+  7) dbt run (Gold)
+  8) publicação do Gold canônico em Parquet (local + S3)
+  9) validação rápida do Gold
 """
 
 from __future__ import annotations
@@ -74,23 +75,31 @@ def _collect_quality_metrics() -> tuple[dict, list[str]]:
                 """
                 select
                     count(*) as vagas_atuais,
-                    count(*) filter (where elegivel_ranking) as elegiveis_ranking,
-                    count(*) filter (where noc_code is null) as sem_noc,
-                    count(*) filter (where salario_oficial_outlier) as salarios_outlier,
+                    count(*) filter (where ranking_confiavel) as ranking_confiavel,
+                    count(*) filter (where codigo_profissao is null) as sem_profissao,
+                    count(*) filter (where salario_referencia_governo_atipico) as salarios_atipicos,
                     count(*) filter (
-                        where geo_mapping_method in ('country_generic', 'remote')
+                        where qualidade_custo_vida = 'auditavel'
+                    ) as custo_auditavel,
+                    count(*) filter (
+                        where metodo_classificacao_profissao = 'gemini_context_fingerprint'
+                    ) as profissao_contextual,
+                    count(*) filter (
+                        where metodo_localizacao in ('country_generic', 'remote')
                     ) as geo_generica,
-                    count(*) filter (where qualidade_ivf = 'baixa') as ivf_baixa
+                    count(*) filter (where confianca_calculo = 'baixa') as calculo_baixa
                 from main.fct_viabilidade_vagas
                 """
             ).fetchone()
             keys = (
                 "vagas_atuais",
-                "elegiveis_ranking",
-                "sem_noc",
-                "salarios_outlier",
+                "ranking_confiavel",
+                "sem_profissao",
+                "salarios_atipicos",
+                "custo_auditavel",
+                "profissao_contextual",
                 "geo_generica",
-                "ivf_baixa",
+                "calculo_baixa",
             )
             metrics.update(dict(zip(keys, row)))
             metrics["vagas_historicas"] = con.execute(
@@ -103,13 +112,18 @@ def _collect_quality_metrics() -> tuple[dict, list[str]]:
         return metrics, [f"Could not collect Gold metrics: {exc}"]
 
     total = metrics.get("vagas_atuais", 0)
-    eligible = metrics.get("elegiveis_ranking", 0)
-    metrics["pct_elegivel_ranking"] = round(100 * eligible / total, 2) if total else 0
-    if metrics.get("sem_noc", 0):
-        alerts.append(f"{metrics['sem_noc']} current jobs without NOC")
-    if metrics.get("salarios_outlier", 0):
-        alerts.append(f"{metrics['salarios_outlier']} official salary outliers")
-    if total and metrics["pct_elegivel_ranking"] < 5:
+    eligible = metrics.get("ranking_confiavel", 0)
+    metrics["pct_ranking_confiavel"] = round(100 * eligible / total, 2) if total else 0
+    if metrics.get("sem_profissao", 0):
+        alerts.append(f"{metrics['sem_profissao']} current jobs without profession code")
+    if metrics.get("salarios_atipicos", 0):
+        alerts.append(f"{metrics['salarios_atipicos']} government salary outliers")
+    expected_auditable = total - metrics.get("geo_generica", 0)
+    if metrics.get("custo_auditavel", 0) < expected_auditable:
+        alerts.append("Some localized jobs lack auditable CMHC/StatCan costs")
+    if total and metrics.get("profissao_contextual", 0) / total < 0.8:
+        alerts.append("Less than 80% of current jobs use contextual profession v2")
+    if total and metrics["pct_ranking_confiavel"] < 5:
         alerts.append("Less than 5% of current jobs are ranking-eligible")
     return metrics, alerts
 
@@ -201,7 +215,17 @@ def main() -> int:
         [python, "src/processing/enrich_jobs.py"],
         skip=args.skip_enrich,
     )
+    _run(
+        "Pesquisa salarial com fonte verificavel",
+        [python, "src/processing/enrich_salary_research.py"],
+        skip=args.skip_enrich,
+    )
 
+    _run(
+        "dbt seed -> referencias oficiais",
+        [dbt_executable, "seed", "--profiles-dir", "."],
+        skip=args.skip_dbt,
+    )
     dbt_cmd = [dbt_executable, "run", "--profiles-dir", "."]
     if args.silver_partition:
         dbt_cmd.extend(["--vars", f'{{"silver_partition": "{args.silver_partition}"}}'])

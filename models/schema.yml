@@ -1,91 +1,355 @@
 version: 2
 
+
+
 models:
+
   - name: stg_adzuna_jobs
+
     description: Histórico append-only das partições Silver de vagas.
+
     columns:
+
       - name: vaga_id
+
         tests: [not_null]
+
       - name: data_snapshot
+
         tests: [not_null]
+
       - name: extracted_at_utc
+
         tests: [not_null]
+
       - name: pipeline_run_id
+
         tests: [not_null]
+
       - name: url_vaga
+
         tests: [not_null]
+
+
+
+  - name: stg_wages_official
+
+    description: >
+
+      Referências salariais governamentais normalizadas. Valores por hora só
+
+      são anualizados quando o período está explicitamente identificado.
+
+    columns:
+
+      - name: wage_period
+
+        tests:
+
+          - not_null
+
+          - accepted_values:
+
+              arguments:
+
+                values: [annual, hourly, ambiguous]
+
+      - name: annualization_factor
+
+        description: 1 para anual, 2080 para horário e nulo quando ambíguo.
+
+
 
   - name: dim_vaga
+
     description: Dimensão SCD2 das versões conhecidas de cada vaga.
+
     columns:
+
       - name: sk_vaga
+
         tests: [not_null, unique]
+
       - name: vaga_id
+
         tests: [not_null]
+
       - name: valid_from
+
         tests: [not_null]
+
       - name: is_current
+
         tests:
+
           - accepted_values:
+
               arguments:
+
                 values: [true, false]
 
+
+
   - name: fct_vagas_snapshot
+
     description: Observações semanais imutáveis das vagas coletadas.
+
     columns:
+
       - name: sk_snapshot
+
         tests: [not_null, unique]
+
       - name: sk_vaga
+
         tests:
+
           - not_null
+
           - relationships:
+
               arguments:
+
                 to: ref('dim_vaga')
+
                 field: sk_vaga
+
       - name: data_snapshot
+
         tests: [not_null]
 
+
+
   - name: fct_viabilidade_vagas
-    description: Visão atual (somente vagas do snapshot mais recente) para o produto.
+
+    description: >
+
+      Visão atual do produto. Todos os valores monetários e classificações
+
+      são ESTIMATIVAS, não números oficiais garantidos.
+
     columns:
+
       - name: vaga_id
+
         tests: [not_null, unique]
+
       - name: url_vaga
+
         tests: [not_null]
+
       - name: is_current
+
         tests:
+
           - accepted_values:
+
               arguments:
+
                 values: [true]
-      - name: fonte_salario
+
+      - name: eh_estimativa
+
         tests:
+
           - accepted_values:
+
               arguments:
+
+                values: [true]
+
+      - name: origem_salario
+
+        tests:
+
+          - accepted_values:
+
+              arguments:
+
                 values:
-                  - declarado
-                  - adzuna_predito
-                  - oficial_noc_provincia
-                  - oficial_noc_nacional
-                  - mercado_cargo_provincia
-                  - mercado_empresa
-                  - mercado_cargo_nacional
-                  - mercado_provincia
-                  - mercado_nacional
+
+                  - declarado_na_vaga
+
+                  - estimado_pesquisa_vaga
+
+                  - estimado_pesquisa_empresa
+
+                  - estimado_pesquisa_web
+
+                  - estimado_adzuna
+
+                  - estimado_governo_provincia
+
+                  - estimado_governo_nacional
+
+                  - estimado_mercado_cargo_provincia
+
+                  - estimado_mercado_empresa
+
+                  - estimado_mercado_cargo_nacional
+
+                  - estimado_mercado_provincia
+
+                  - estimado_mercado_nacional
+
                   - indisponivel
-      - name: confianca_salario
+
+      - name: confianca_salario_estimada
+
         tests:
+
           - accepted_values:
+
               arguments:
+
                 values: [alta, media, baixa, indisponivel]
-      - name: qualidade_ivf
+
+      - name: confianca_calculo
+
         tests:
+
           - accepted_values:
+
               arguments:
+
                 values: [alta, media, baixa]
+
       - name: modelo_fiscal
+
         tests:
+
           - accepted_values:
+
               arguments:
-                values: [simplificado_v1]
+
+                values: [cra_progressivo_2026_v2]
+
       - name: aviso_modelo_fiscal
+
         tests: [not_null]
+
+
+
+  - name: cenarios_vaga_remota
+
+    description: >
+
+      Cenários ESTIMADOS para vagas remotas (vaga × cidade).
+
+      Inclui linha de referência nacional (não entra no ranking).
+
+    columns:
+
+      - name: sk_cenario_remoto
+
+        tests: [not_null, unique]
+
+      - name: vaga_id
+
+        tests: [not_null]
+
+      - name: cidade_cenario
+
+        tests: [not_null]
+
+      - name: eh_estimativa
+
+        tests:
+
+          - accepted_values:
+
+              arguments:
+
+                values: [true]
+
+      - name: tipo_cenario
+
+        tests:
+
+          - accepted_values:
+
+              arguments:
+
+                values: [cidade_ancora, referencia_nacional]
+
+      - name: modelo_fiscal
+
+        tests:
+
+          - accepted_values:
+
+              arguments:
+
+                values: [cra_progressivo_2026_v2]
+
+      - name: aviso_cenario_remoto
+
+        tests: [not_null]
+
+
+
+seeds:
+
+  - name: tax_brackets_2026
+
+    description: Faixas marginais oficiais CRA/Revenu Québec para o ano fiscal de 2026.
+
+    columns:
+
+      - name: jurisdiction
+
+        tests:
+
+          - not_null
+
+          - accepted_values:
+
+              arguments:
+
+                values: [FED, PROV]
+
+      - name: province_code
+
+        tests: [not_null]
+
+      - name: bracket_order
+
+        tests: [not_null]
+
+      - name: lower_threshold
+
+        tests: [not_null]
+
+      - name: rate
+
+        tests: [not_null]
+
+      - name: source_url
+
+        tests: [not_null]
+
+
+
+  - name: tax_parameters_2026
+
+    description: Créditos pessoais básicos provinciais usados no fiscal v2.
+
+    columns:
+
+      - name: province_code
+
+        tests: [not_null, unique]
+
+      - name: basic_personal_amount
+
+        tests: [not_null]
+
+      - name: lowest_rate
+
+        tests: [not_null]
+
+      - name: source_url
+
+        tests: [not_null]
+
+

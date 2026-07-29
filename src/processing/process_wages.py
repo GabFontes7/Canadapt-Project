@@ -72,7 +72,7 @@ def main() -> int:
                             '{csv_sql}',
                             header = true,
                             sample_size = -1,
-                            ignore_errors = true
+                            ignore_errors = false
                         )
                     )
                     SELECT
@@ -84,22 +84,49 @@ def main() -> int:
                         try_cast(Low_Wage_Salaire_Minium as double) as wage_low_original,
                         try_cast(Median_Wage_Salaire_Median as double) as wage_median_original,
                         try_cast(High_Wage_Salaire_Maximal as double) as wage_high_original,
-                        try_cast(Annual_Wage_Flag_Salaire_annuel as integer) = 1
-                            as wage_is_annual,
+                        cast(Annual_Wage_Flag_Salaire_annuel as varchar)
+                            as wage_period_flag_raw,
+                        case
+                            when try_cast(Annual_Wage_Flag_Salaire_annuel as integer) = 1
+                                then 'annual'
+                            when try_cast(Annual_Wage_Flag_Salaire_annuel as integer) = 0
+                                then 'hourly'
+                            else 'ambiguous'
+                        end as wage_period,
+                        case
+                            when try_cast(Annual_Wage_Flag_Salaire_annuel as integer) = 1
+                                then true
+                            when try_cast(Annual_Wage_Flag_Salaire_annuel as integer) = 0
+                                then false
+                            else null
+                        end as wage_is_annual,
+                        case
+                            when try_cast(Annual_Wage_Flag_Salaire_annuel as integer) = 1
+                                then 1
+                            when try_cast(Annual_Wage_Flag_Salaire_annuel as integer) = 0
+                                then 2080
+                            else null
+                        end as annualization_factor,
                         case
                             when try_cast(Annual_Wage_Flag_Salaire_annuel as integer) = 1
                                 then try_cast(Low_Wage_Salaire_Minium as double)
-                            else try_cast(Low_Wage_Salaire_Minium as double) * 2080
+                            when try_cast(Annual_Wage_Flag_Salaire_annuel as integer) = 0
+                                then try_cast(Low_Wage_Salaire_Minium as double) * 2080
+                            else null
                         end as salary_annual_low,
                         case
                             when try_cast(Annual_Wage_Flag_Salaire_annuel as integer) = 1
                                 then try_cast(Median_Wage_Salaire_Median as double)
-                            else try_cast(Median_Wage_Salaire_Median as double) * 2080
+                            when try_cast(Annual_Wage_Flag_Salaire_annuel as integer) = 0
+                                then try_cast(Median_Wage_Salaire_Median as double) * 2080
+                            else null
                         end as salary_annual_median,
                         case
                             when try_cast(Annual_Wage_Flag_Salaire_annuel as integer) = 1
                                 then try_cast(High_Wage_Salaire_Maximal as double)
-                            else try_cast(High_Wage_Salaire_Maximal as double) * 2080
+                            when try_cast(Annual_Wage_Flag_Salaire_annuel as integer) = 0
+                                then try_cast(High_Wage_Salaire_Maximal as double) * 2080
+                            else null
                         end as salary_annual_high,
                         try_cast(Reference_Period as integer) as source_reference_period,
                         try_cast(Revision_Date_Date_revision as date) as source_revision_date,
@@ -113,6 +140,23 @@ def main() -> int:
             rows = con.execute(
                 "select count(*) from read_parquet(?)", [str(tmp_path)]
             ).fetchone()[0]
+            ambiguous_rows = con.execute(
+                """
+                select count(*)
+                from read_parquet(?)
+                where wage_period = 'ambiguous'
+                """,
+                [str(tmp_path)],
+            ).fetchone()[0]
+            usable_rows = con.execute(
+                """
+                select count(*)
+                from read_parquet(?)
+                where wage_period in ('annual', 'hourly')
+                  and salary_annual_median is not null
+                """,
+                [str(tmp_path)],
+            ).fetchone()[0]
         tmp_path.replace(out_path)
 
         bucket, s3 = _s3_target()
@@ -122,8 +166,11 @@ def main() -> int:
         )
         s3.upload_file(str(out_path), bucket, key)
         logger.info(
-            "Official wages Silver complete | rows=%d | local=%s | s3=s3://%s/%s",
+            "Official wages Silver complete | rows=%d | usable=%d | "
+            "ambiguous_period=%d | local=%s | s3=s3://%s/%s",
             rows,
+            usable_rows,
+            ambiguous_rows,
             out_path,
             bucket,
             key,

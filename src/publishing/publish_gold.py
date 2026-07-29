@@ -29,6 +29,7 @@ GOLD_TABLES = (
     "fct_vagas_snapshot",
     "fato_vagas_visto",
     "fct_viabilidade_vagas",
+    "cenarios_vaga_remota",
 )
 
 logging.basicConfig(

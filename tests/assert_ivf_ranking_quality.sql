@@ -1,11 +1,11 @@
--- A ranking-eligible row must be based on declared, consistent salary and good geo.
+-- Ranking confiável exige salário declarado na vaga e cálculo de alta confiança.
 select *
 from {{ ref('fct_viabilidade_vagas') }}
-where elegivel_ranking
+where ranking_confiavel
   and (
-      fonte_salario <> 'declarado'
+      origem_salario <> 'declarado_na_vaga'
       or not coalesce(salario_declarado_consistente, false)
-      or qualidade_ivf <> 'alta'
-      or geo_mapping_method not in ('exact', 'satellite')
-      or geo_confidence < 0.8
+      or confianca_calculo <> 'alta'
+      or metodo_localizacao not in ('exact', 'satellite')
+      or confianca_localizacao < 0.8
   )

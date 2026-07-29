@@ -6,7 +6,7 @@ custos regionais e uma estimativa transparente de viabilidade financeira.
 ## Arquitetura
 
 ```text
-Adzuna + ESDC + Gemini
+Adzuna + ESDC + CMHC + StatCan + CRA/Revenu Québec
         |
         v
 Bronze JSON/CSV (local + S3, imutável)
@@ -72,26 +72,43 @@ streamlit run app.py
 
 O app usa `data/gold/parquet/.../latest/` e, quando os arquivos não existem
 localmente, baixa os aliases `latest` do S3. O filtro padrão exibe apenas
-`elegivel_ranking = true`: salário declarado consistente, geografia confiável
-e IVF de qualidade alta.
+`ranking_confiavel = true`: salário declarado consistente, localização
+confiável e cálculo estimado de alta confiança.
 
 Para abrir o DuckDB no DBeaver, use conexão read-only. Desconecte o DBeaver
 antes de executar dbt, pois uma conexão de escrita mantém lock no arquivo.
 
 ## Salários
 
-A cascata é:
+A cascata estimada e auditável é:
 
 1. salário válido declarado na vaga;
-2. mediana oficial ESDC por NOC e província;
-3. mediana oficial ESDC por NOC nacional;
-4. benchmarks internos identificados em `fonte_salario`.
+2. pesquisa assistida por Gemini com fonte https verificável
+   (mesma vaga / página da empresa / agregador reputável);
+3. referência governamental ESDC por código de profissão e província;
+4. referência governamental ESDC por código de profissão nacional;
+5. faixa predita pela Adzuna;
+6. benchmarks internos identificados em `origem_salario`.
 
-Valores estimados incluem `aviso_salario`, `confianca_salario`, NOC, fonte e
-ano de referência. O IVF usa `modelo_fiscal = simplificado_v1`; ele é uma
-estimativa de produto, não aconselhamento fiscal.
+Gemini atua somente como pesquisador: um número sem fonte rastreável é
+descartado. Quando nenhuma evidência atende ao contrato, o salário cai para
+a próxima fonte da cascata ou fica como `estimativa indisponível`.
 
-Valores preditos pela Adzuna são separados de salários declarados. Benchmarks
-oficiais estatisticamente atípicos são marcados em `salario_oficial_outlier` e
-rebaixados na confiança. A visão de produto contém somente vagas observadas no
-snapshot mais recente; o histórico permanece em `fct_vagas_snapshot`.
+Referências salariais por hora são anualizadas por 2.080 somente quando a fonte
+as identifica explicitamente como horárias. Períodos ausentes ou ambíguos são
+preservados para auditoria, mas não entram no cálculo. Referências
+governamentais estatisticamente atípicas também são auditadas, porém ignoradas
+na cascata salarial.
+
+Todas as saídas monetárias usam nomes explícitos como
+`salario_bruto_anual_estimado` e `sobra_mensal_estimada`. Mesmo quando o salário
+foi declarado na vaga ou a referência veio do governo, o resultado do produto
+continua sendo uma estimativa, não uma garantia ou aconselhamento.
+
+Aluguéis são extraídos diretamente do CMHC Rental Market Survey 2025. O custo
+sem aluguel deriva das tabelas StatCan SHS 2023 por província, ajustadas para
+domicílio unipessoal e pelo CPI de 2026. O JSON Bronze registra URLs, anos,
+fatores e mês de referência; essa ingestão não usa LLM.
+
+O NOC usa cache v2 por fingerprint de título + categoria + descrição. Entradas
+com baixa confiança ou versão antiga do prompt são reclassificadas.

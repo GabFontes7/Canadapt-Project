@@ -1,9 +1,10 @@
 """
-CanAdapt — Bronze cost-of-living ingestion (Gemini agent + Dual-Write).
+CanAdapt — Bronze cost-of-living ingestion (official sources + Dual-Write).
 
-Two-step production pattern:
-  1) gemini-3.1-flash-lite + Google Search → textual research report (2026 CA data)
-  2) gemini-3.1-flash-lite + Pydantic response_schema → CostOfLivingPayload JSON
+Direct, reproducible sources:
+  1) CMHC Rental Market Survey 2025 HTML tables
+  2) Statistics Canada SHS 2023 + CPI 2026 downloadable CSV tables
+  3) CRA/Revenu Québec consumption-tax rates effective in 2026
 
 Dual-Write: local data/bronze/... and AWS S3 bronze/cost_of_living/...
 """
@@ -14,18 +15,19 @@ import json
 import logging
 import os
 import sys
-import time
-from datetime import datetime
+import unicodedata
+import zipfile
+from datetime import datetime, timezone
+from io import BytesIO, StringIO
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Literal
 
 import boto3
+import pandas as pd
+import requests
 from botocore.exceptions import BotoCoreError, ClientError
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
-from google.genai.errors import ClientError as GeminiClientError
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 # -----------------------------------------------------------------------------
 # Config
@@ -34,48 +36,59 @@ from pydantic import BaseModel, Field, ValidationError
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BRONZE_ROOT = PROJECT_ROOT / "data" / "bronze"
 
-DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
 REFERENCE_YEAR = 2026
-GEMINI_MAX_RETRIES = 5
-GEMINI_RETRY_BASE_DELAY_SECONDS = 20
-# Retryable Gemini API statuses (quota/rate + transient).
-GEMINI_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
-GEOGRAPHIC_SCOPE = """
-ON (Ontario): Toronto, Ottawa, Waterloo
-BC (British Columbia): Vancouver, Victoria
-AB (Alberta): Calgary, Edmonton
-QC (Québec): Montréal, Québec City
-NS (Nova Scotia): Halifax
-MB (Manitoba): Winnipeg
-SK (Saskatchewan): Saskatoon, Regina
-NB (New Brunswick): Moncton, Fredericton
-PE (Prince Edward Island): Charlottetown
-NL (Newfoundland and Labrador): St. John's
-""".strip()
+CMHC_PROVINCE_IDS = {
+    "NL": "10",
+    "PE": "11",
+    "NS": "12",
+    "NB": "13",
+    "QC": "24",
+    "ON": "35",
+    "MB": "46",
+    "SK": "47",
+    "AB": "48",
+    "BC": "59",
+}
 
-RESEARCH_PROMPT = f"""
-Pesquise na internet as tabelas oficiais da Canada Revenue Agency (CRA) para taxas
-de impostos de consumo (GST, PST, HST) vigentes em {REFERENCE_YEAR} para todas as
-10 províncias do Canadá.
+CMHC_CITY_LABELS = {
+    "Toronto": "Toronto",
+    "Ottawa": "Ottawa",
+    "Waterloo": "Kitchener - Cambridge - Waterloo",
+    "Vancouver": "Vancouver",
+    "Victoria": "Victoria",
+    "Calgary": "Calgary",
+    "Edmonton": "Edmonton",
+    "Montréal": "Montréal",
+    "Québec City": "Québec",
+    "Halifax": "Halifax",
+    "Winnipeg": "Winnipeg",
+    "Saskatoon": "Saskatoon",
+    "Regina": "Regina",
+    "Moncton": "Moncton",
+    "Fredericton": "Fredericton",
+    "Charlottetown": "Charlottetown",
+    "St. John's": "St. John's",
+}
 
-Além disso, busque os dados reais mais recentes de aluguel médio de apartamentos
-de 1 quarto (1-Bedroom) do CMHC (Canada Mortgage and Housing Corporation) de
-{REFERENCE_YEAR}, e a média de custo de vida mensal (sem aluguel) para uma pessoa
-solteira em {REFERENCE_YEAR} nas cidades especificadas abaixo.
+PROVINCE_CONFIG = {
+    "ON": ("Ontario", 0.05, 0.08, 0.13, ("Toronto", "Ottawa", "Waterloo")),
+    "BC": ("British Columbia", 0.05, 0.07, 0.12, ("Vancouver", "Victoria")),
+    "AB": ("Alberta", 0.05, 0.00, 0.05, ("Calgary", "Edmonton")),
+    "QC": ("Québec", 0.05, 0.09975, 0.14975, ("Montréal", "Québec City")),
+    "NS": ("Nova Scotia", 0.05, 0.09, 0.14, ("Halifax",)),
+    "MB": ("Manitoba", 0.05, 0.07, 0.12, ("Winnipeg",)),
+    "SK": ("Saskatchewan", 0.05, 0.06, 0.11, ("Saskatoon", "Regina")),
+    "NB": ("New Brunswick", 0.05, 0.10, 0.15, ("Moncton", "Fredericton")),
+    "PE": ("Prince Edward Island", 0.05, 0.10, 0.15, ("Charlottetown",)),
+    "NL": ("Newfoundland and Labrador", 0.05, 0.10, 0.15, ("St. John's",)),
+}
 
-Escopo geográfico obrigatório (todas as cidades devem ser cobertas):
-{GEOGRAPHIC_SCOPE}
-
-Entregue um relatório textual consolidado, claro e citável, contendo:
-- GST / PST / HST por província (valores numéricos e se a província usa HST unificado)
-- Aluguel médio 1-bedroom por cidade (CMHC ou fonte oficial equivalente mais recente)
-- Custo de vida mensal sem aluguel para solteiro por cidade (StatCan / Numbeo / equivalentes)
-- Nome exato das fontes/relatórios encontrados para moradia e custo de vida
-
-Se algum valor de {REFERENCE_YEAR} ainda não estiver publicado, use o dado oficial mais
-recente disponível e declare explicitamente o ano da fonte.
-""".strip()
+CRA_SALES_TAX_URL = (
+    "https://www.canada.ca/en/revenue-agency/services/tax/businesses/topics/"
+    "gst-hst-businesses/charge-collect-which-rate.html"
+)
+STATCAN_SHS_URL = "https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1110022201"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -93,10 +106,14 @@ logger = logging.getLogger("canadapt.ingestion.cost_of_living")
 class CityCost(BaseModel):
     nome_cidade: str
     aluguel_medio_1bdr: float = Field(
-        description="Média de aluguel de 1 quarto baseada no CMHC de 2026"
+        ge=300,
+        le=10000,
+        description="Aluguel de 1 quarto do CMHC, com ano da fonte explícito"
     )
     custo_vida_sem_aluguel: float = Field(
-        description="Estimativa de custo de vida mensal de solteiro (StatCan/Numbeo 2026)"
+        ge=300,
+        le=10000,
+        description="Estimativa mensal auditável baseada no StatCan SHS + CPI"
     )
     fonte_moradia_verificada: str = Field(
         description="Nome da fonte/relatório de moradia encontrado"
@@ -104,6 +121,31 @@ class CityCost(BaseModel):
     fonte_custo_vida_verificada: str = Field(
         description="Nome da fonte de custo de vida encontrada"
     )
+    fonte_moradia_url: str
+    fonte_custo_vida_url: str
+    ano_fonte_moradia: int
+    ano_fonte_custo_vida: int
+    qualidade_fonte_moradia: Literal["a", "b", "c", "d", "unknown"]
+    metodo_custo_vida: Literal["statcan_shs_cpi_provincial"]
+    custo_vida_estimado: bool = True
+    custo_base_provincial_2023: float | None = None
+    fator_domicilio_unipessoal: float | None = None
+    fator_cpi_2026: float | None = None
+    cpi_mes_referencia: str | None = None
+
+    @field_validator("fonte_moradia_url")
+    @classmethod
+    def validate_cmhc_url(cls, value: str) -> str:
+        if "cmhc-schl.gc.ca" not in value:
+            raise ValueError("Housing source must be an official CMHC URL")
+        return value
+
+    @field_validator("fonte_custo_vida_url")
+    @classmethod
+    def validate_statcan_url(cls, value: str) -> str:
+        if "statcan.gc.ca" not in value:
+            raise ValueError("Cost source must be an official StatCan URL")
+        return value
 
 
 class ProvinceTax(BaseModel):
@@ -116,13 +158,329 @@ class ProvinceTax(BaseModel):
     aliquota_hst_total: float = Field(
         description="Soma de GST + PST, ou taxa unificada se HST"
     )
+    fonte_imposto_url: str
+    vigencia_imposto: str
     cidades: list[CityCost]
+
+    @field_validator("fonte_imposto_url")
+    @classmethod
+    def validate_tax_url(cls, value: str) -> str:
+        if "canada.ca" not in value and "revenuquebec.ca" not in value:
+            raise ValueError("Tax source must be CRA or Revenu Québec")
+        return value
 
 
 class CostOfLivingPayload(BaseModel):
     ano_referencia: int = Field(description="Deve ser obrigatoriamente 2026")
     data_execucao: str = Field(description="Data atual no formato YYYY-MM-DD")
+    consultado_em_utc: str
+    metodologia_versao: Literal["official_sources_v2"]
     provincias: list[ProvinceTax]
+
+
+# -----------------------------------------------------------------------------
+# Direct official CMHC extraction
+# -----------------------------------------------------------------------------
+
+
+def _normalize_label(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", value)
+    ascii_text = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return " ".join(ascii_text.casefold().split())
+
+
+def _cmhc_url(province_code: str) -> str:
+    return (
+        "https://www03.cmhc-schl.gc.ca/hmip-pimh/en/TableMapChart/"
+        "TableCategory?categoryLevel1=Primary+Rental+Market"
+        "&categoryLevel2=Average+Rent+%28%24%29"
+        f"&geographyId={CMHC_PROVINCE_IDS[province_code]}"
+        "&geographyType=Province"
+    )
+
+
+def fetch_cmhc_rents_2025() -> dict[str, dict[str, Any]]:
+    """Read one-bedroom rents directly from official CMHC HTML tables."""
+    result: dict[str, dict[str, Any]] = {}
+    city_to_province = {
+        city: province
+        for province, cities in {
+            "ON": ("Toronto", "Ottawa", "Waterloo"),
+            "BC": ("Vancouver", "Victoria"),
+            "AB": ("Calgary", "Edmonton"),
+            "QC": ("Montréal", "Québec City"),
+            "NS": ("Halifax",),
+            "MB": ("Winnipeg",),
+            "SK": ("Saskatoon", "Regina"),
+            "NB": ("Moncton", "Fredericton"),
+            "PE": ("Charlottetown",),
+            "NL": ("St. John's",),
+        }.items()
+        for city in cities
+    }
+
+    for province_code in sorted(set(city_to_province.values())):
+        url = _cmhc_url(province_code)
+        response = requests.get(url, timeout=45)
+        response.raise_for_status()
+        tables = pd.read_html(StringIO(response.text))
+        if not tables:
+            raise RuntimeError(f"CMHC returned no table for {province_code}")
+        table = tables[0]
+        city_column = table.columns[0]
+        normalized_rows = {
+            _normalize_label(str(row[city_column])): row
+            for _, row in table.iterrows()
+        }
+        for city, expected_province in city_to_province.items():
+            if expected_province != province_code:
+                continue
+            label = CMHC_CITY_LABELS[city]
+            row = normalized_rows.get(_normalize_label(label))
+            if row is None:
+                raise RuntimeError(f"CMHC city not found: {city} ({province_code})")
+            raw_rent = str(row["1 Bedroom"]).replace(",", "").strip()
+            if raw_rent in {"**", "nan", ""}:
+                raise RuntimeError(f"CMHC one-bedroom rent suppressed for {city}")
+            rent = float(raw_rent)
+            quality_raw = str(row.get("1 Bedroom.1", "unknown")).strip().lower()
+            quality = quality_raw if quality_raw in {"a", "b", "c", "d"} else "unknown"
+            result[city] = {
+                "rent": rent,
+                "quality": quality,
+                "url": url,
+            }
+
+    if set(result) != set(CMHC_CITY_LABELS):
+        missing = sorted(set(CMHC_CITY_LABELS) - set(result))
+        raise RuntimeError(f"CMHC extraction incomplete; missing={missing}")
+    logger.info("CMHC direct extraction complete | cities=%d | edition=2025", len(result))
+    return result
+
+
+def apply_official_cmhc_rents(
+    payload: CostOfLivingPayload,
+    rents: dict[str, dict[str, Any]],
+) -> CostOfLivingPayload:
+    """Replace any LLM rent value with the directly parsed CMHC observation."""
+    for province in payload.provincias:
+        for city in province.cidades:
+            official = rents[city.nome_cidade]
+            city.aluguel_medio_1bdr = official["rent"]
+            city.qualidade_fonte_moradia = official["quality"]
+            city.fonte_moradia_url = official["url"]
+            city.fonte_moradia_verificada = (
+                "CMHC Rental Market Survey 2025 — Primary Rental Market"
+            )
+            city.ano_fonte_moradia = 2025
+    return payload
+
+
+def _download_statcan_table(table_id: str) -> pd.DataFrame:
+    url = f"https://www150.statcan.gc.ca/n1/en/tbl/csv/{table_id}-eng.zip"
+    response = requests.get(url, timeout=120)
+    response.raise_for_status()
+    with zipfile.ZipFile(BytesIO(response.content)) as archive:
+        csv_name = next(
+            name
+            for name in archive.namelist()
+            if name.endswith(".csv") and "MetaData" not in name
+        )
+        return pd.read_csv(archive.open(csv_name), low_memory=False)
+
+
+def fetch_statcan_single_person_costs_2026() -> dict[str, dict[str, Any]]:
+    """Derive province-level monthly non-shelter cost from official StatCan tables."""
+    category = "Household expenditures, summary-level categories"
+    shs_province = _download_statcan_table("11100222")
+    shs_type = _download_statcan_table("11100224")
+    cpi = _download_statcan_table("18100004")
+
+    def value(
+        frame: pd.DataFrame,
+        *,
+        geo: str,
+        expense: str,
+        household_type: str | None = None,
+    ) -> float:
+        mask = (
+            (frame["REF_DATE"] == 2023)
+            & (frame["GEO"] == geo)
+            & (frame["Statistic"] == "Average expenditure per household")
+            & (frame[category] == expense)
+        )
+        if household_type is not None:
+            mask &= frame["Household type"] == household_type
+        values = frame.loc[mask, "VALUE"].dropna()
+        if len(values) != 1:
+            raise RuntimeError(
+                f"Unexpected StatCan cardinality: geo={geo}, expense={expense}, "
+                f"household_type={household_type}, rows={len(values)}"
+            )
+        return float(values.iloc[0])
+
+    all_non_shelter = value(
+        shs_type,
+        geo="Canada",
+        expense="Total current consumption",
+        household_type="All classes",
+    ) - value(
+        shs_type,
+        geo="Canada",
+        expense="Shelter",
+        household_type="All classes",
+    )
+    single_non_shelter = value(
+        shs_type,
+        geo="Canada",
+        expense="Total current consumption",
+        household_type="One person households",
+    ) - value(
+        shs_type,
+        geo="Canada",
+        expense="Shelter",
+        household_type="One person households",
+    )
+    single_factor = single_non_shelter / all_non_shelter
+
+    cpi_all = cpi[
+        (cpi["GEO"] == "Canada")
+        & (cpi["Products and product groups"] == "All-items")
+    ].copy()
+    cpi_all["year"] = cpi_all["REF_DATE"].astype(str).str[:4].astype(int)
+    cpi_2023 = float(cpi_all.loc[cpi_all["year"] == 2023, "VALUE"].mean())
+    cpi_2026_rows = cpi_all.loc[cpi_all["year"] == 2026].sort_values("REF_DATE")
+    if cpi_2026_rows.empty:
+        raise RuntimeError("StatCan CPI has no 2026 observations")
+    cpi_2026 = float(cpi_2026_rows["VALUE"].mean())
+    cpi_factor = cpi_2026 / cpi_2023
+    cpi_reference = str(cpi_2026_rows["REF_DATE"].iloc[-1])
+
+    province_names = {
+        "ON": "Ontario",
+        "BC": "British Columbia",
+        "AB": "Alberta",
+        "QC": "Quebec",
+        "NS": "Nova Scotia",
+        "MB": "Manitoba",
+        "SK": "Saskatchewan",
+        "NB": "New Brunswick",
+        "PE": "Prince Edward Island",
+        "NL": "Newfoundland and Labrador",
+    }
+    costs: dict[str, dict[str, Any]] = {}
+    for code, geo in province_names.items():
+        current = value(
+            shs_province,
+            geo=geo,
+            expense="Total current consumption",
+        )
+        shelter = value(shs_province, geo=geo, expense="Shelter")
+        province_non_shelter = current - shelter
+        costs[code] = {
+            "monthly": round(province_non_shelter * single_factor * cpi_factor / 12, 2),
+            "base_2023": province_non_shelter,
+            "single_factor": single_factor,
+            "cpi_factor": cpi_factor,
+            "cpi_reference": cpi_reference,
+        }
+    logger.info(
+        "StatCan direct derivation complete | provinces=%d | single_factor=%.4f | "
+        "cpi_factor=%.4f | latest_cpi=%s",
+        len(costs),
+        single_factor,
+        cpi_factor,
+        cpi_reference,
+    )
+    return costs
+
+
+def apply_official_statcan_costs(
+    payload: CostOfLivingPayload,
+    costs: dict[str, dict[str, Any]],
+) -> CostOfLivingPayload:
+    source_url = "https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1110022201"
+    for province in payload.provincias:
+        official = costs[province.sigla_provincia]
+        for city in province.cidades:
+            city.custo_vida_sem_aluguel = official["monthly"]
+            city.fonte_custo_vida_url = source_url
+            city.fonte_custo_vida_verificada = (
+                "Statistics Canada SHS tables 11-10-0222-01 and 11-10-0224-01; "
+                "CPI table 18-10-0004-01"
+            )
+            city.ano_fonte_custo_vida = 2023
+            city.metodo_custo_vida = "statcan_shs_cpi_provincial"
+            city.custo_vida_estimado = True
+            city.custo_base_provincial_2023 = official["base_2023"]
+            city.fator_domicilio_unipessoal = official["single_factor"]
+            city.fator_cpi_2026 = official["cpi_factor"]
+            city.cpi_mes_referencia = official["cpi_reference"]
+    return payload
+
+
+def build_official_payload(
+    now: datetime,
+    rents: dict[str, dict[str, Any]],
+    costs: dict[str, dict[str, Any]],
+) -> CostOfLivingPayload:
+    """Build the contract without LLM-generated monetary or tax values."""
+    provinces: list[ProvinceTax] = []
+    for code, (
+        name,
+        gst,
+        pst,
+        total_tax,
+        city_names,
+    ) in PROVINCE_CONFIG.items():
+        province_cost = costs[code]
+        cities = []
+        for city_name in city_names:
+            rent = rents[city_name]
+            cities.append(
+                CityCost(
+                    nome_cidade=city_name,
+                    aluguel_medio_1bdr=rent["rent"],
+                    custo_vida_sem_aluguel=province_cost["monthly"],
+                    fonte_moradia_verificada=(
+                        "CMHC Rental Market Survey 2025 — Primary Rental Market"
+                    ),
+                    fonte_custo_vida_verificada=(
+                        "Statistics Canada SHS tables 11-10-0222-01 and "
+                        "11-10-0224-01; CPI table 18-10-0004-01"
+                    ),
+                    fonte_moradia_url=rent["url"],
+                    fonte_custo_vida_url=STATCAN_SHS_URL,
+                    ano_fonte_moradia=2025,
+                    ano_fonte_custo_vida=2023,
+                    qualidade_fonte_moradia=rent["quality"],
+                    metodo_custo_vida="statcan_shs_cpi_provincial",
+                    custo_vida_estimado=True,
+                    custo_base_provincial_2023=province_cost["base_2023"],
+                    fator_domicilio_unipessoal=province_cost["single_factor"],
+                    fator_cpi_2026=province_cost["cpi_factor"],
+                    cpi_mes_referencia=province_cost["cpi_reference"],
+                )
+            )
+        provinces.append(
+            ProvinceTax(
+                sigla_provincia=code,
+                nome_provincia=name,
+                aliquota_gst=gst,
+                aliquota_pst=pst,
+                aliquota_hst_total=total_tax,
+                fonte_imposto_url=CRA_SALES_TAX_URL,
+                vigencia_imposto="2026",
+                cidades=cities,
+            )
+        )
+    return CostOfLivingPayload(
+        ano_referencia=REFERENCE_YEAR,
+        data_execucao=now.strftime("%Y-%m-%d"),
+        consultado_em_utc=datetime.now(timezone.utc).isoformat(),
+        metodologia_versao="official_sources_v2",
+        provincias=provinces,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -132,20 +490,6 @@ class CostOfLivingPayload(BaseModel):
 
 def load_env() -> None:
     load_dotenv(PROJECT_ROOT / ".env")
-
-
-def resolve_gemini_model() -> str:
-    """Allow override via GEMINI_MODEL; default to current Flash GA for new keys."""
-    return os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
-
-
-def require_gemini_api_key() -> str:
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        raise EnvironmentError(
-            "Missing GEMINI_API_KEY in the project .env file."
-        )
-    return api_key
 
 
 def resolve_s3_bucket_name() -> str:
@@ -189,163 +533,6 @@ def partition_paths(now: datetime) -> tuple[Path, str]:
     local_path = BRONZE_ROOT / year_p / month_p / day_p / filename
     s3_key = f"bronze/cost_of_living/{year_p}/{month_p}/{day_p}/{filename}"
     return local_path, s3_key
-
-
-# -----------------------------------------------------------------------------
-# Gemini two-step agent
-# -----------------------------------------------------------------------------
-
-
-def _gemini_error_code(exc: BaseException) -> int | None:
-    code = getattr(exc, "code", None)
-    return int(code) if isinstance(code, int) else None
-
-
-def generate_content_with_retry(
-    label: str,
-    call: Callable[[], Any],
-) -> Any:
-    """Call Gemini with exponential backoff on 429 / transient 5xx."""
-    last_error: Exception | None = None
-
-    for attempt in range(1, GEMINI_MAX_RETRIES + 1):
-        try:
-            return call()
-        except GeminiClientError as exc:
-            status = _gemini_error_code(exc)
-            if status not in GEMINI_RETRYABLE_STATUS_CODES or attempt >= GEMINI_MAX_RETRIES:
-                raise
-            delay = GEMINI_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
-            logger.warning(
-                "%s | Gemini HTTP %s (attempt %d/%d). Backoff %ss…",
-                label,
-                status,
-                attempt,
-                GEMINI_MAX_RETRIES,
-                delay,
-            )
-            time.sleep(delay)
-            last_error = exc
-        except Exception as exc:  # noqa: BLE001
-            # Some SDK wraps may not expose ClientError; detect 429 in message.
-            msg = str(exc)
-            is_quota = "429" in msg or "RESOURCE_EXHAUSTED" in msg
-            if not is_quota or attempt >= GEMINI_MAX_RETRIES:
-                raise
-            delay = GEMINI_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
-            logger.warning(
-                "%s | Gemini quota/rate limit (attempt %d/%d). Backoff %ss…",
-                label,
-                attempt,
-                GEMINI_MAX_RETRIES,
-                delay,
-            )
-            time.sleep(delay)
-            last_error = exc
-
-    assert last_error is not None
-    raise last_error
-
-
-def etapa_1_pesquisa(client: genai.Client, model: str) -> str:
-    """Step 1: Google Search grounding → consolidated textual research report."""
-    logger.info("Etapa 1/2 | Gemini + Google Search | model=%s", model)
-    try:
-        response = generate_content_with_retry(
-            "Etapa 1/2",
-            lambda: client.models.generate_content(
-                model=model,
-                contents=RESEARCH_PROMPT,
-                config=types.GenerateContentConfig(
-                    tools=[types.Tool(google_search=types.GoogleSearch())],
-                    temperature=0.2,
-                ),
-            ),
-        )
-    except Exception as exc:  # noqa: BLE001 — surface Gemini API failures clearly
-        raise RuntimeError(f"Gemini research call failed: {exc}") from exc
-
-    text = (response.text or "").strip()
-    if not text:
-        raise RuntimeError("Gemini research call returned an empty report.")
-
-    logger.info("Etapa 1/2 | relatório textual recebido | chars=%d", len(text))
-    return text
-
-
-def etapa_2_estruturar(
-    client: genai.Client,
-    model: str,
-    research_report: str,
-    execution_date: str,
-) -> CostOfLivingPayload:
-    """Step 2: structure the research report into CostOfLivingPayload via schema."""
-    logger.info(
-        "Etapa 2/2 | Gemini structured output | model=%s | schema=CostOfLivingPayload",
-        model,
-    )
-
-    structure_prompt = f"""
-Com base EXCLUSIVAMENTE no relatório de pesquisa abaixo, preencha a estrutura JSON
-solicitada (CostOfLivingPayload).
-
-Regras obrigatórias:
-- ano_referencia deve ser {REFERENCE_YEAR}
-- data_execucao deve ser "{execution_date}"
-- Inclua as 10 províncias canadenses e TODAS as cidades do escopo definido
-- Valores numéricos devem ser floats puros (sem símbolos de moeda ou %):
-  * alíquotas como fração (ex.: 0.05 para 5%, 0.13 para 13% HST)
-  * valores monetários mensais em CAD (ex.: 1850.0)
-- Cite nas strings de fonte o nome real do relatório/fonte encontrado no relatório
-- Não invente cidades fora do escopo; não omita cidades do escopo
-
-Escopo geográfico:
-{GEOGRAPHIC_SCOPE}
-
-RELATÓRIO DE PESQUISA:
----
-{research_report}
----
-""".strip()
-
-    try:
-        response = generate_content_with_retry(
-            "Etapa 2/2",
-            lambda: client.models.generate_content(
-                model=model,
-                contents=structure_prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=CostOfLivingPayload,
-                    temperature=0.1,
-                ),
-            ),
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"Gemini structured-output call failed: {exc}") from exc
-
-    raw = (response.text or "").strip()
-    if not raw:
-        raise RuntimeError("Gemini structured-output call returned empty content.")
-
-    try:
-        payload = CostOfLivingPayload.model_validate_json(raw)
-    except ValidationError as exc:
-        raise RuntimeError(
-            f"Pydantic validation failed for CostOfLivingPayload: {exc}"
-        ) from exc
-
-    if payload.ano_referencia != REFERENCE_YEAR:
-        raise RuntimeError(
-            f"ano_referencia must be {REFERENCE_YEAR}, got {payload.ano_referencia}."
-        )
-
-    logger.info(
-        "Etapa 2/2 | JSON validado | provincias=%d | cidades=%d",
-        len(payload.provincias),
-        sum(len(p.cidades) for p in payload.provincias),
-    )
-    return payload
 
 
 # -----------------------------------------------------------------------------
@@ -396,16 +583,14 @@ def save_s3(payload: CostOfLivingPayload, s3_key: str) -> str:
 def main() -> int:
     load_env()
     now = datetime.now().astimezone()
-    execution_date = now.strftime("%Y-%m-%d")
     local_path, s3_key = partition_paths(now)
 
     try:
-        api_key = require_gemini_api_key()
-        model = resolve_gemini_model()
-        client = genai.Client(api_key=api_key)
-
-        research_report = etapa_1_pesquisa(client, model)
-        payload = etapa_2_estruturar(client, model, research_report, execution_date)
+        payload = build_official_payload(
+            now,
+            fetch_cmhc_rents_2025(),
+            fetch_statcan_single_person_costs_2026(),
+        )
 
         save_local(payload, local_path)
         s3_uri = save_s3(payload, s3_key)
@@ -416,6 +601,7 @@ def main() -> int:
     summary: dict[str, Any] = {
         "ano_referencia": payload.ano_referencia,
         "data_execucao": payload.data_execucao,
+        "metodologia_versao": payload.metodologia_versao,
         "provincias": len(payload.provincias),
         "cidades": sum(len(p.cidades) for p in payload.provincias),
         "local": str(local_path),

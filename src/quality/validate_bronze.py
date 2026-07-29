@@ -60,6 +60,11 @@ def _validate_cost_of_living(path: Path) -> dict[str, Any]:
     provinces = doc.get("provincias") or []
     cities = [city for province in provinces for city in province.get("cidades", [])]
     errors: list[str] = []
+    methodology = doc.get("metodologia_versao")
+    if methodology != "official_sources_v2":
+        errors.append(
+            f"expected metodologia_versao=official_sources_v2, got {methodology!r}"
+        )
     if len(provinces) != 10:
         errors.append(f"expected 10 provinces, got {len(provinces)}")
     if len(cities) < 17:
@@ -73,11 +78,33 @@ def _validate_cost_of_living(path: Path) -> dict[str, Any]:
     ]
     if invalid:
         errors.append(f"{len(invalid)} cities with invalid costs")
+    invalid_sources = [
+        city
+        for city in cities
+        if "cmhc-schl.gc.ca" not in str(city.get("fonte_moradia_url") or "")
+        or "statcan.gc.ca" not in str(city.get("fonte_custo_vida_url") or "")
+        or city.get("metodo_custo_vida") != "statcan_shs_cpi_provincial"
+        or city.get("custo_vida_estimado") is not True
+        or not isinstance(city.get("custo_base_provincial_2023"), (int, float))
+        or not isinstance(city.get("fator_domicilio_unipessoal"), (int, float))
+        or not isinstance(city.get("fator_cpi_2026"), (int, float))
+        or not city.get("cpi_mes_referencia")
+    ]
+    if invalid_sources:
+        errors.append(f"{len(invalid_sources)} cities without auditable official sources")
+    province_codes = [province.get("sigla_provincia") for province in provinces]
+    expected_codes = {"ON", "BC", "AB", "QC", "NS", "MB", "SK", "NB", "PE", "NL"}
+    if set(province_codes) != expected_codes:
+        errors.append("province identity set does not match the 10-province contract")
+    if len(province_codes) != len(set(province_codes)):
+        errors.append("duplicate province codes")
     return {
         "file": str(path),
         "provinces": len(provinces),
         "cities": len(cities),
         "invalid_rows": len(invalid),
+        "invalid_sources": len(invalid_sources),
+        "methodology": methodology,
         "errors": errors,
     }
 

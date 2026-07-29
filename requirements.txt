@@ -8,3 +8,4 @@ pyarrow>=14.0.0
 dbt-duckdb>=1.7.0
 streamlit>=1.40.0
 pandas>=2.0.0
+lxml>=5.0.0
