@@ -1,0 +1,286 @@
+{
+  "Brampton, Peel region": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "British Columbia, Canada": {
+    "cidade": "Vancouver",
+    "provincia": "BC"
+  },
+  "CN Tower, City of Toronto": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Calgary, Calgary region": {
+    "cidade": "Calgary",
+    "provincia": "AB"
+  },
+  "Canada": {
+    "cidade": "Remote",
+    "provincia": "Remote"
+  },
+  "Charlottetown, Queens": {
+    "cidade": "Charlottetown",
+    "provincia": "PE"
+  },
+  "Concord, York region": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Connaught, Calgary": {
+    "cidade": "Calgary",
+    "provincia": "AB"
+  },
+  "Copeland, Ottawa": {
+    "cidade": "Ottawa",
+    "provincia": "ON"
+  },
+  "Corman Park, Saskatoon": {
+    "cidade": "Saskatoon",
+    "provincia": "SK"
+  },
+  "Dartmouth, Halifax region": {
+    "cidade": "Halifax",
+    "provincia": "NS"
+  },
+  "Delta, Greater Vancouver": {
+    "cidade": "Vancouver",
+    "provincia": "BC"
+  },
+  "Douglas, Fredericton": {
+    "cidade": "Fredericton",
+    "provincia": "NB"
+  },
+  "Duncan, Cowichan Valley": {
+    "cidade": "Victoria",
+    "provincia": "BC"
+  },
+  "Edmonton, Edmonton region": {
+    "cidade": "Edmonton",
+    "provincia": "AB"
+  },
+  "Etobicoke, Toronto": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Farnham, Brome-Missisquoi": {
+    "cidade": "Montréal",
+    "provincia": "QC"
+  },
+  "Fort McMurray region, Alberta": {
+    "cidade": "Edmonton",
+    "provincia": "AB"
+  },
+  "Goodwood, Halifax region": {
+    "cidade": "Halifax",
+    "provincia": "NS"
+  },
+  "Grande Prairie, Grande Prairie region": {
+    "cidade": "Edmonton",
+    "provincia": "AB"
+  },
+  "Greater Vancouver, British Columbia": {
+    "cidade": "Vancouver",
+    "provincia": "BC"
+  },
+  "Greektown, Vancouver": {
+    "cidade": "Vancouver",
+    "provincia": "BC"
+  },
+  "Grimsby, Niagara": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Guelph, Wellington region": {
+    "cidade": "Waterloo",
+    "provincia": "ON"
+  },
+  "Halifax region, Nova Scotia": {
+    "cidade": "Halifax",
+    "provincia": "NS"
+  },
+  "Halifax, Halifax region": {
+    "cidade": "Halifax",
+    "provincia": "NS"
+  },
+  "Kelowna, Central Okanagan": {
+    "cidade": "Vancouver",
+    "provincia": "BC"
+  },
+  "Kingston, Lennox and Addington": {
+    "cidade": "Ottawa",
+    "provincia": "ON"
+  },
+  "Kirkland, Montréal": {
+    "cidade": "Montréal",
+    "provincia": "QC"
+  },
+  "Lancaster Park, Edmonton region": {
+    "cidade": "Edmonton",
+    "provincia": "AB"
+  },
+  "Langley, Greater Vancouver": {
+    "cidade": "Vancouver",
+    "provincia": "BC"
+  },
+  "Laval, Laval region": {
+    "cidade": "Montréal",
+    "provincia": "QC"
+  },
+  "Lloydminster, Lloydminster region": {
+    "cidade": "Edmonton",
+    "provincia": "AB"
+  },
+  "London, Middlesex": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Lower St. Marys, Fredericton": {
+    "cidade": "Fredericton",
+    "provincia": "NB"
+  },
+  "Lévis, Desjardins": {
+    "cidade": "Québec City",
+    "provincia": "QC"
+  },
+  "M'Chigeeng, Manitoulin": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Markham, York region": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Mississauga, Peel region": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Montréal, Québec": {
+    "cidade": "Montréal",
+    "provincia": "QC"
+  },
+  "North Vancouver, Greater Vancouver": {
+    "cidade": "Vancouver",
+    "provincia": "BC"
+  },
+  "Oakville, Halton": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Ontario, Canada": {
+    "cidade": "Remote",
+    "provincia": "Remote"
+  },
+  "Ottawa, Ottawa region": {
+    "cidade": "Ottawa",
+    "provincia": "ON"
+  },
+  "Peterborough, Peterborough region": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Pickering, Durham region": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Red Deer, Red Deer region": {
+    "cidade": "Calgary",
+    "provincia": "AB"
+  },
+  "Regina region, Saskatchewan": {
+    "cidade": "Regina",
+    "provincia": "SK"
+  },
+  "Regina, Regina region": {
+    "cidade": "Regina",
+    "provincia": "SK"
+  },
+  "Saint-Hyacinthe, Les Maskoutains": {
+    "cidade": "Montréal",
+    "provincia": "QC"
+  },
+  "Saint-Paul, Kent": {
+    "cidade": "Moncton",
+    "provincia": "NB"
+  },
+  "Saskatoon, Saskatchewan": {
+    "cidade": "Saskatoon",
+    "provincia": "SK"
+  },
+  "St. Catharines, Niagara": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Stratford, Perth region": {
+    "cidade": "Waterloo",
+    "provincia": "ON"
+  },
+  "Sudbury, Greater Sudbury": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Surrey, Greater Vancouver": {
+    "cidade": "Vancouver",
+    "provincia": "BC"
+  },
+  "Sydney, Cape Breton": {
+    "cidade": "Halifax",
+    "provincia": "NS"
+  },
+  "Toronto Dominion Centre, City of Toronto": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Toronto, Ontario": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Trinity, City of Toronto": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Truro, Colchester": {
+    "cidade": "Halifax",
+    "provincia": "NS"
+  },
+  "Tuxedo, Calgary": {
+    "cidade": "Calgary",
+    "provincia": "AB"
+  },
+  "Unionville, York region": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Vancouver, Greater Vancouver": {
+    "cidade": "Vancouver",
+    "provincia": "BC"
+  },
+  "Vernon, North Okanagan": {
+    "cidade": "Vancouver",
+    "provincia": "BC"
+  },
+  "Vernon, Ottawa region": {
+    "cidade": "Ottawa",
+    "provincia": "ON"
+  },
+  "Victoria, Capital": {
+    "cidade": "Victoria",
+    "provincia": "BC"
+  },
+  "Waterloo region, Ontario": {
+    "cidade": "Waterloo",
+    "provincia": "ON"
+  },
+  "Westmount, Montréal": {
+    "cidade": "Montréal",
+    "provincia": "QC"
+  },
+  "Whitby, Durham region": {
+    "cidade": "Toronto",
+    "provincia": "ON"
+  },
+  "Winnipeg, Winnipeg region": {
+    "cidade": "Winnipeg",
+    "provincia": "MB"
+  }
+}

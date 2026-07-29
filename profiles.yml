@@ -1,0 +1,7 @@
+canadapt_profile:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: 'data/gold/canadapt_analytics.duckdb'
+      threads: 4
