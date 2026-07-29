@@ -65,25 +65,85 @@ def main() -> int:
                 print()
 
         print("=" * 72)
-        print("2) Amostra (3 linhas) — fct_viabilidade_vagas")
+        print("2) Cobertura salarial — fct_viabilidade_vagas")
+        print("=" * 72)
+        cobertura = con.execute(
+            """
+            SELECT
+                count(*) AS total,
+                count(*) FILTER (WHERE salario_estimado = false) AS declarados,
+                count(*) FILTER (WHERE salario_estimado = true) AS estimados,
+                count(*) FILTER (WHERE fonte_salario = 'mercado_cargo_provincia') AS via_cargo_provincia,
+                count(*) FILTER (WHERE fonte_salario = 'mercado_empresa') AS via_empresa,
+                count(*) FILTER (WHERE fonte_salario = 'mercado_cargo_nacional') AS via_cargo_nacional,
+                count(*) FILTER (WHERE fonte_salario = 'mercado_provincia') AS via_provincia,
+                count(*) FILTER (WHERE fonte_salario = 'mercado_nacional') AS via_nacional,
+                count(*) FILTER (WHERE classificacao_viabilidade = 'Sem Dados Salariais') AS sem_dados
+            FROM main.fct_viabilidade_vagas
+            """
+        ).fetchone()
+        labels = [
+            "total",
+            "declarados",
+            "estimados",
+            "via_cargo_provincia",
+            "via_empresa",
+            "via_cargo_nacional",
+            "via_provincia",
+            "via_nacional",
+            "sem_dados",
+        ]
+        for label, val in zip(labels, cobertura):
+            print(f"  {label}: {val}")
+        print()
+
+        print("=" * 72)
+        print("3) Amostra estimada (3 linhas) — fct_viabilidade_vagas")
         print("=" * 72)
         sample_rows = con.execute(
             """
             SELECT
                 titulo_cargo,
-                poder_compra_real_mensal,
+                salario_declarado,
+                salario_bruto_anual,
+                familia_cargo,
+                fonte_salario,
+                confianca_salario,
+                motivo_salario_estimado,
+                tamanho_amostra_salario,
+                aviso_salario,
                 classificacao_viabilidade
             FROM main.fct_viabilidade_vagas
+            WHERE salario_estimado = true
             LIMIT 3
             """
         ).fetchall()
 
         if not sample_rows:
-            print("Tabela fct_viabilidade_vagas vazia.")
+            print("Nenhuma vaga com salário estimado.")
         else:
-            for i, (titulo, poder_compra, classificacao) in enumerate(sample_rows, start=1):
+            for i, row in enumerate(sample_rows, start=1):
+                (
+                    titulo,
+                    declarado,
+                    bruto,
+                    familia,
+                    fonte,
+                    confianca,
+                    motivo,
+                    amostra,
+                    aviso,
+                    classificacao,
+                ) = row
                 print(f"  [{i}] titulo_cargo: {titulo}")
-                print(f"      poder_compra_real_mensal: {poder_compra}")
+                print(f"      salario_declarado: {declarado}")
+                print(f"      salario_bruto_anual: {bruto}*")
+                print(f"      familia_cargo: {familia}")
+                print(f"      fonte_salario: {fonte}")
+                print(f"      confianca_salario: {confianca}")
+                print(f"      motivo_salario_estimado: {motivo}")
+                print(f"      tamanho_amostra_salario: {amostra}")
+                print(f"      aviso_salario: {aviso}")
                 print(f"      classificacao_viabilidade: {classificacao}")
                 print()
 

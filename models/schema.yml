@@ -1,0 +1,74 @@
+version: 2
+
+models:
+  - name: stg_adzuna_jobs
+    description: Histórico append-only das partições Silver de vagas.
+    columns:
+      - name: vaga_id
+        tests: [not_null]
+      - name: data_snapshot
+        tests: [not_null]
+      - name: url_vaga
+        tests: [not_null]
+
+  - name: dim_vaga
+    description: Dimensão SCD2 das versões conhecidas de cada vaga.
+    columns:
+      - name: sk_vaga
+        tests: [not_null, unique]
+      - name: vaga_id
+        tests: [not_null]
+      - name: valid_from
+        tests: [not_null]
+      - name: is_current
+        tests:
+          - accepted_values:
+              arguments:
+                values: [true, false]
+
+  - name: fct_vagas_snapshot
+    description: Observações semanais imutáveis das vagas coletadas.
+    columns:
+      - name: sk_snapshot
+        tests: [not_null, unique]
+      - name: sk_vaga
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_vaga')
+                field: sk_vaga
+      - name: data_snapshot
+        tests: [not_null]
+
+  - name: fct_viabilidade_vagas
+    description: Visão atual acumulada para consumo pelo produto.
+    columns:
+      - name: vaga_id
+        tests: [not_null, unique]
+      - name: url_vaga
+        tests: [not_null]
+      - name: fonte_salario
+        tests:
+          - accepted_values:
+              arguments:
+                values:
+                  - declarado
+                  - oficial_noc_provincia
+                  - oficial_noc_nacional
+                  - mercado_cargo_provincia
+                  - mercado_empresa
+                  - mercado_cargo_nacional
+                  - mercado_provincia
+                  - mercado_nacional
+                  - indisponivel
+      - name: confianca_salario
+        tests:
+          - accepted_values:
+              arguments:
+                values: [alta, media, baixa, indisponivel]
+      - name: modelo_fiscal
+        tests:
+          - accepted_values:
+              arguments:
+                values: [simplificado_v1]

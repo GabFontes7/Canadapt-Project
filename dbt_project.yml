@@ -11,6 +11,16 @@ macro-paths: ["macros"]
 target-path: "target"
 clean-targets: ["target", "dbt_packages"]
 
+# Por padrão, os stagings descobrem as partições e selecionam apenas a mais
+# recente. Para reprocessamento, sobrescreva silver_partition no dbt run:
+# --vars '{"silver_partition": "year=2026/month=07/day=15"}'
+vars:
+  silver_jobs_root: "data/silver/jobs"
+  silver_cost_of_living_root: "data/silver/cost_of_living"
+  silver_wages_root: "data/silver/wages"
+  silver_partition: "year=*/month=*/day=*"
+  wages_reference_year: "*"
+
 models:
   canadapt:
     staging:

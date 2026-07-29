@@ -37,9 +37,9 @@ GEO_CACHE_PATH = SILVER_ROOT / "metadata" / "geo_cache.json"
 # Cheapest → most capable (string without "models/" prefix for the SDK).
 GEMINI_MODEL_FALLBACK_QUEUE = (
     "gemini-3.1-flash-lite",
-    "gemini-2.5-flash-lite",
+    "gemini-3.5-flash-lite",
     "gemini-3.5-flash",
-    "gemini-2.5-flash",
+    "gemini-3.6-flash",
 )
 
 GEO_BATCH_SIZE = 40
@@ -74,7 +74,9 @@ GEO_SYSTEM_INSTRUCTION = (
     "províncias: ON, BC, AB, QC, NS, MB, SK, NB, PE, NL). "
     "Se o termo original for remoto ou genérico do país, use 'Remote' para "
     "ambos os campos. Se for uma cidade satélite, mapeie para a cidade de "
-    "referência mais próxima de nossa lista."
+    "referência/CMA mais próxima de nossa lista. Preencha cma_padronizada com "
+    "essa cidade de referência, metodo_mapeamento com exact, satellite, remote "
+    "ou country_generic e uma confiança entre 0 e 1."
 )
 
 logging.basicConfig(
@@ -100,6 +102,13 @@ class GeoMapping(BaseModel):
     provincia_padronizada: str = Field(
         description="Uma das 10 siglas de província ou Remote"
     )
+    cma_padronizada: str = Field(
+        description="CMA/cidade de referência da lista oficial ou Remote"
+    )
+    metodo_mapeamento: str = Field(
+        description="exact, satellite, remote ou country_generic"
+    )
+    confianca: float = Field(ge=0, le=1)
 
 
 class GeoMappingPayload(BaseModel):
@@ -230,7 +239,7 @@ def partition_segments_from_bronze_path(adzuna_path: Path) -> tuple[str, str, st
 # -----------------------------------------------------------------------------
 
 
-def load_geo_cache(path: Path = GEO_CACHE_PATH) -> dict[str, dict[str, str]]:
+def load_geo_cache(path: Path = GEO_CACHE_PATH) -> dict[str, dict[str, Any]]:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         path.write_text("{}", encoding="utf-8")
@@ -246,7 +255,7 @@ def load_geo_cache(path: Path = GEO_CACHE_PATH) -> dict[str, dict[str, str]]:
 
 
 def save_geo_cache(
-    cache: dict[str, dict[str, str]],
+    cache: dict[str, dict[str, Any]],
     path: Path = GEO_CACHE_PATH,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -330,7 +339,7 @@ def call_gemini_with_fallback(
     )
 
 
-def normalize_geo_mapping(item: GeoMapping) -> dict[str, str]:
+def normalize_geo_mapping(item: GeoMapping) -> dict[str, Any]:
     """Light post-validation against the closed city list."""
     city = item.cidade_padronizada.strip()
     province = item.provincia_padronizada.strip()
@@ -352,21 +361,36 @@ def normalize_geo_mapping(item: GeoMapping) -> dict[str, str]:
             city,
             item.termo_original,
         )
-        return {"cidade": "Remote", "provincia": "Remote"}
+        return {
+            "cidade": "Remote",
+            "provincia": "Remote",
+            "cma": "Remote",
+            "metodo": "fallback_unknown",
+            "confianca": 0.0,
+        }
 
     expected_prov = OFFICIAL_CITY_TO_PROVINCE[city]
     if province != expected_prov and city != "Remote":
         province = expected_prov
 
-    return {"cidade": city, "provincia": province}
+    method = item.metodo_mapeamento.strip().lower()
+    if method not in {"exact", "satellite", "remote", "country_generic"}:
+        method = "model_other"
+    return {
+        "cidade": city,
+        "provincia": province,
+        "cma": city if city != "Remote" else "Remote",
+        "metodo": method,
+        "confianca": round(float(item.confianca), 4),
+    }
 
 
-def gemini_map_locations(terms: list[str]) -> tuple[dict[str, dict[str, str]], str]:
+def gemini_map_locations(terms: list[str]) -> tuple[dict[str, dict[str, Any]], str]:
     """Batch-map raw location strings via Gemini fallback. Returns (partial_cache, model)."""
     if not terms:
         return {}, ""
 
-    mappings: dict[str, dict[str, str]] = {}
+    mappings: dict[str, dict[str, Any]] = {}
     model_used = ""
 
     for i in range(0, len(terms), GEO_BATCH_SIZE):
@@ -389,7 +413,13 @@ def gemini_map_locations(terms: list[str]) -> tuple[dict[str, dict[str, str]], s
         for term in batch:
             if term not in mappings:
                 logger.warning("Gemini omitted term %r → Remote", term)
-                mappings[term] = {"cidade": "Remote", "provincia": "Remote"}
+                mappings[term] = {
+                    "cidade": "Remote",
+                    "provincia": "Remote",
+                    "cma": "Remote",
+                    "metodo": "model_omitted",
+                    "confianca": 0.0,
+                }
 
     return mappings, model_used
 
@@ -443,7 +473,7 @@ def extract_distinct_locations_duckdb(con: duckdb.DuckDBPyConnection, adzuna_pat
 def build_jobs_clean_parquet(
     con: duckdb.DuckDBPyConnection,
     adzuna_path: Path,
-    geo_cache: dict[str, dict[str, str]],
+    geo_cache: dict[str, dict[str, Any]],
     out_path: Path,
 ) -> int:
     """Project standardized geography onto Bronze jobs and write Parquet."""
@@ -454,6 +484,9 @@ def build_jobs_clean_parquet(
             "termo_bruto": term,
             "cidade_padronizada": meta.get("cidade", "Remote"),
             "provincia_padronizada": meta.get("provincia", "Remote"),
+            "cma_padronizada": meta.get("cma", meta.get("cidade", "Remote")),
+            "geo_mapping_method": meta.get("metodo", "legacy_cache"),
+            "geo_confidence": meta.get("confianca", 0.5),
         }
         for term, meta in geo_cache.items()
     ]
@@ -497,7 +530,10 @@ def build_jobs_clean_parquet(
               SELECT
                 f.*,
                 COALESCE(g.cidade_padronizada, 'Remote') AS cidade_padronizada,
-                COALESCE(g.provincia_padronizada, 'Remote') AS provincia_padronizada
+                COALESCE(g.provincia_padronizada, 'Remote') AS provincia_padronizada,
+                COALESCE(g.cma_padronizada, 'Remote') AS cma_padronizada,
+                COALESCE(g.geo_mapping_method, 'fallback_unmapped') AS geo_mapping_method,
+                COALESCE(g.geo_confidence, 0.0) AS geo_confidence
               FROM flat f
               LEFT JOIN geo_map g
                 ON f.location_raw = g.termo_bruto
@@ -515,7 +551,16 @@ def build_jobs_clean_parquet(
         rows: list[dict[str, Any]] = []
         for j in results:
             loc = (j.get("location") or {}).get("display_name")
-            geo = geo_cache.get(loc or "", {"cidade": "Remote", "provincia": "Remote"})
+            geo = geo_cache.get(
+                loc or "",
+                {
+                    "cidade": "Remote",
+                    "provincia": "Remote",
+                    "cma": "Remote",
+                    "metodo": "fallback_unmapped",
+                    "confianca": 0.0,
+                },
+            )
             rows.append(
                 {
                     "job_id": str(j.get("id") or ""),
@@ -531,6 +576,9 @@ def build_jobs_clean_parquet(
                     "salary_is_predicted": j.get("salary_is_predicted"),
                     "cidade_padronizada": geo.get("cidade", "Remote"),
                     "provincia_padronizada": geo.get("provincia", "Remote"),
+                    "cma_padronizada": geo.get("cma", geo.get("cidade", "Remote")),
+                    "geo_mapping_method": geo.get("metodo", "legacy_cache"),
+                    "geo_confidence": geo.get("confianca", 0.5),
                 }
             )
         rows_json = out_path.parent / "_jobs_clean_tmp.json"
@@ -627,7 +675,13 @@ def main() -> int:
         distinct_terms = extract_distinct_locations_duckdb(con, adzuna_path)
         total_unique = len(distinct_terms)
 
-        missing = [t for t in distinct_terms if t not in geo_cache]
+        required_geo_fields = {"cidade", "provincia", "cma", "metodo", "confianca"}
+        missing = [
+            term
+            for term in distinct_terms
+            if term not in geo_cache
+            or not required_geo_fields.issubset(geo_cache[term])
+        ]
         cache_hits = total_unique - len(missing)
 
         model_used = ""
@@ -667,6 +721,10 @@ def main() -> int:
         col_n = build_cost_of_living_clean_parquet(con, col_path, col_local)
         logger.info("Silver CoL local written | rows=%d | %s", col_n, col_local)
         col_s3 = upload_file_to_s3(col_local, col_s3_key)
+        geo_cache_s3 = upload_file_to_s3(
+            GEO_CACHE_PATH,
+            "silver/metadata/geo_cache.json",
+        )
 
         con.close()
 
@@ -685,6 +743,7 @@ def main() -> int:
         print(f"CoL local:                        {col_local}")
         print(f"CoL S3:                           {col_s3}")
         print(f"Geo cache:                        {GEO_CACHE_PATH}")
+        print(f"Geo cache S3:                     {geo_cache_s3}")
         print("================================================\n")
         return 0
 

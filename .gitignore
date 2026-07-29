@@ -10,6 +10,8 @@ data/silver/**
 !data/silver/.gitkeep
 data/gold/**
 !data/gold/.gitkeep
+data/metadata/**
+!data/metadata/.gitkeep
 
 # DuckDB (bancos analíticos, incl. duplicados soltos)
 *.duckdb
