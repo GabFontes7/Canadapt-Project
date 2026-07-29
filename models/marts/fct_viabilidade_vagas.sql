@@ -34,10 +34,15 @@ joined as (
         f.geo_mapping_method,
         f.geo_confidence,
         f.salario_bruto_anual as salario_declarado,
+        f.salario_bruto_anual_maximo as salario_declarado_maximo,
+        coalesce(f.salario_adzuna_estimado, 0) = 1 as salario_adzuna_predito,
         f.url_vaga,
         f.data_criacao,
+        f.extracted_at_utc,
+        f.pipeline_run_id,
         f.first_seen_at,
         f.last_seen_at,
+        f.is_current,
         d.nome_cidade,
         d.sigla_provincia,
         d.nome_provincia,
@@ -67,17 +72,34 @@ joined as (
         on f.noc_code = wn.noc_code
 ),
 
+salario_adzuna_normalizado as (
+    select
+        *,
+        case
+            when salario_declarado between 20000 and 500000
+             and salario_declarado_maximo between 20000 and 500000
+             and salario_declarado_maximo >= salario_declarado
+                then (salario_declarado + salario_declarado_maximo) / 2
+            when salario_declarado between 20000 and 500000
+                then salario_declarado
+            else null
+        end as salario_adzuna_referencia
+    from joined
+),
+
 -- Famílias amplas evitam depender de títulos idênticos e esparsos.
 classificado as (
     select
         *,
         case
-            when salario_declarado between 20000 and 500000 then salario_declarado
-            else null
+            when not salario_adzuna_predito then salario_adzuna_referencia
         end as salario_declarado_validado,
         case
+            when salario_adzuna_predito then salario_adzuna_referencia
+        end as salario_adzuna_predito_validado,
+        case
             when salario_declarado is null then null
-            when salario_declarado between 20000 and 500000 then true
+            when salario_adzuna_referencia is not null then true
             else false
         end as salario_declarado_consistente,
         case
@@ -99,7 +121,35 @@ classificado as (
                 then 'gestao_consultoria'
             else 'outros'
         end as familia_cargo
-    from joined
+    from salario_adzuna_normalizado
+),
+
+official_family_stats as (
+    select
+        familia_cargo,
+        approx_quantile(salario_oficial_mediano, 0.95) as salario_oficial_p95
+    from classificado
+    where salario_oficial_mediano is not null
+    group by familia_cargo
+),
+
+classificado_com_outlier as (
+    select
+        c.*,
+        s.salario_oficial_p95,
+        (
+            c.salario_oficial_mediano > 300000
+            and c.salario_oficial_mediano
+                > coalesce(s.salario_oficial_p95 * 1.5, 300000)
+        ) as salario_oficial_outlier,
+        case
+            when c.salario_oficial_mediano > 300000
+             and c.salario_oficial_mediano
+                > coalesce(s.salario_oficial_p95 * 1.5, 300000)
+                then 'salario_oficial_acima_p95_familia'
+        end as motivo_outlier_salario
+    from classificado c
+    left join official_family_stats s using (familia_cargo)
 ),
 
 -- Valores fora desta faixa não são usados como referência anual.
@@ -174,6 +224,7 @@ estimado as (
         bn.salario_mediano_nacional,
         coalesce(
             j.salario_declarado_validado,
+            j.salario_adzuna_predito_validado,
             j.salario_oficial_mediano,
             bcp.salario_mediano_cargo_provincia,
             be.salario_mediano_empresa,
@@ -184,6 +235,7 @@ estimado as (
         case
             when j.salario_declarado_validado is not null then false
             when coalesce(
+                j.salario_adzuna_predito_validado,
                 j.salario_oficial_mediano,
                 bcp.salario_mediano_cargo_provincia,
                 be.salario_mediano_empresa,
@@ -195,6 +247,7 @@ estimado as (
         end as salario_estimado,
         case
             when j.salario_declarado_validado is not null then 'declarado'
+            when j.salario_adzuna_predito_validado is not null then 'adzuna_predito'
             when j.salario_oficial_mediano is not null
               and j.abrangencia_salario_oficial = 'provincia'
                 then 'oficial_noc_provincia'
@@ -209,6 +262,8 @@ estimado as (
         end as fonte_salario,
         case
             when j.salario_declarado_validado is not null then 'alta'
+            when j.salario_adzuna_predito_validado is not null then 'media'
+            when coalesce(j.salario_oficial_outlier, false) then 'baixa'
             when j.salario_oficial_mediano is not null
               and coalesce(j.noc_confidence, 0) >= 0.75 then 'alta'
             when j.salario_oficial_mediano is not null then 'media'
@@ -221,11 +276,13 @@ estimado as (
         end as confianca_salario,
         case
             when j.salario_declarado_validado is not null then null
+            when j.salario_adzuna_predito_validado is not null then 'salario_predito_adzuna'
             when j.salario_declarado is not null then 'valor_declarado_inconsistente'
             else 'salario_nao_informado'
         end as motivo_salario_estimado,
         case
             when j.salario_declarado_validado is not null then null
+            when j.salario_adzuna_predito_validado is not null then null
             when j.salario_oficial_mediano is not null then null
             when bcp.salario_mediano_cargo_provincia is not null then bcp.n_cargo_provincia
             when be.salario_mediano_empresa is not null then
@@ -240,6 +297,8 @@ estimado as (
         end as tamanho_amostra_salario,
         case
             when j.salario_declarado_validado is not null then null
+            when j.salario_adzuna_predito_validado is not null then
+                '* Faixa salarial predita pela Adzuna — valor de referência é o ponto médio'
             when j.salario_oficial_mediano is not null then
                 case
                     when j.salario_declarado is not null then '* Valor declarado inconsistente — '
@@ -284,7 +343,7 @@ estimado as (
             else
                 '* Salário não informado — sem benchmark disponível'
         end as aviso_salario
-    from classificado j
+    from classificado_com_outlier j
     left join bench_cargo_provincia bcp
         on j.familia_cargo = bcp.familia_cargo
        and j.sigla_provincia = bcp.sigla_provincia
@@ -331,6 +390,39 @@ poder as (
             else aluguel_medio_1bdr + custo_vida_sem_aluguel
         end as custo_total_mensal
     from liquido
+),
+
+qualidade as (
+    select
+        *,
+        round(poder_compra_real_mensal, 0) as poder_compra_real_mensal_arred,
+        round(custo_total_mensal, 0) as custo_total_mensal_arred,
+        round(salario_liquido_anual, 0) as salario_liquido_anual_arred,
+        round(salario_bruto_anual, 0) as salario_bruto_anual_arred,
+        case
+            when poder_compra_real_mensal is null or custo_total_mensal is null then null
+            else round(poder_compra_real_mensal - custo_total_mensal, 0)
+        end as ivf_score_arred,
+        case
+            when fonte_salario = 'declarado'
+             and coalesce(salario_declarado_consistente, false)
+             and coalesce(geo_confidence, 0) >= 0.8
+             and coalesce(geo_mapping_method, '') in ('exact', 'satellite')
+            then 'alta'
+            when confianca_salario = 'alta'
+             and coalesce(geo_confidence, 0) >= 0.7
+             and coalesce(geo_mapping_method, '') in ('exact', 'satellite')
+            then 'media'
+            else 'baixa'
+        end as qualidade_ivf,
+        case
+            when salario_bruto_anual is null then 'Sem Dados Salariais'
+            when poder_compra_real_mensal is null or custo_total_mensal is null then 'Sem Dados Salariais'
+            when (poder_compra_real_mensal - custo_total_mensal) > 1500 then 'Prosperidade'
+            when (poder_compra_real_mensal - custo_total_mensal) >= 0 then 'Equilíbrio'
+            else 'Risco Financeiro'
+        end as classificacao_viabilidade_bruta
+    from poder
 )
 
 select
@@ -339,8 +431,11 @@ select
     empresa,
     url_vaga,
     data_criacao,
+    extracted_at_utc,
+    pipeline_run_id,
     first_seen_at,
     last_seen_at,
+    is_current,
     noc_code,
     noc_title,
     seniority,
@@ -349,8 +444,10 @@ select
     geo_mapping_method,
     geo_confidence,
     salario_declarado,
+    salario_declarado_maximo,
+    salario_adzuna_predito,
     salario_declarado_consistente,
-    salario_bruto_anual,
+    salario_bruto_anual_arred as salario_bruto_anual,
     salario_estimado,
     familia_cargo,
     fonte_salario,
@@ -361,6 +458,9 @@ select
     salario_oficial_minimo,
     salario_oficial_mediano,
     salario_oficial_maximo,
+    salario_oficial_p95,
+    salario_oficial_outlier,
+    motivo_outlier_salario,
     fonte_salario_oficial,
     ano_referencia_salario_oficial,
     abrangencia_salario_oficial,
@@ -368,25 +468,27 @@ select
     sigla_provincia,
     nome_provincia,
     aliquota_imposto_renda_combinado,
-    salario_liquido_anual,
-    poder_compra_real_mensal,
+    salario_liquido_anual_arred as salario_liquido_anual,
+    poder_compra_real_mensal_arred as poder_compra_real_mensal,
     aluguel_medio_1bdr,
     custo_vida_sem_aluguel,
-    custo_total_mensal,
+    custo_total_mensal_arred as custo_total_mensal,
     'simplificado_v1' as modelo_fiscal,
+    'IVF com imposto simplificado (3 faixas + HST aproximado). Nao e aconselhamento fiscal.' as aviso_modelo_fiscal,
+    qualidade_ivf,
+    (
+        qualidade_ivf = 'alta'
+        and fonte_salario = 'declarado'
+        and coalesce(salario_declarado_consistente, false)
+    ) as elegivel_ranking,
+    ivf_score_arred as ivf_score,
+    ivf_score_arred as ivf_score_estimado,
+    classificacao_viabilidade_bruta,
     case
-        when poder_compra_real_mensal is null or custo_total_mensal is null then null
-        else poder_compra_real_mensal - custo_total_mensal
-    end as ivf_score,
-    case
-        when poder_compra_real_mensal is null or custo_total_mensal is null then null
-        else poder_compra_real_mensal - custo_total_mensal
-    end as ivf_score_estimado,
-    case
-        when salario_bruto_anual is null then 'Sem Dados Salariais'
-        when poder_compra_real_mensal is null or custo_total_mensal is null then 'Sem Dados Salariais'
-        when (poder_compra_real_mensal - custo_total_mensal) > 1500 then 'Prosperidade'
-        when (poder_compra_real_mensal - custo_total_mensal) >= 0 then 'Equilíbrio'
-        else 'Risco Financeiro'
+        when classificacao_viabilidade_bruta = 'Sem Dados Salariais'
+            then classificacao_viabilidade_bruta
+        when qualidade_ivf = 'alta' and fonte_salario = 'declarado'
+            then classificacao_viabilidade_bruta
+        else 'Estimativa — ' || classificacao_viabilidade_bruta
     end as classificacao_viabilidade
-from poder
+from qualidade

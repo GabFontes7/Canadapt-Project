@@ -478,6 +478,8 @@ def build_jobs_clean_parquet(
 ) -> int:
     """Project standardized geography onto Bronze jobs and write Parquet."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    run_id = os.getenv("CANADAPT_RUN_ID", "").strip() or "local-manual"
+    run_id_sql = run_id.replace("'", "''")
 
     mapping_rows = [
         {
@@ -505,9 +507,15 @@ def build_jobs_clean_parquet(
         con.execute(
             f"""
             COPY (
-              WITH jobs AS (
-                SELECT unnest(payload.results) AS j
+              WITH doc AS (
+                SELECT *
                 FROM read_json_auto('{path}')
+              ),
+              jobs AS (
+                SELECT
+                  unnest(payload.results) AS j,
+                  CAST(extracted_at_utc AS VARCHAR) AS extracted_at_utc
+                FROM doc
               ),
               flat AS (
                 SELECT
@@ -521,7 +529,9 @@ def build_jobs_clean_parquet(
                   CAST(j.redirect_url AS VARCHAR) AS redirect_url,
                   TRY_CAST(j.salary_min AS DOUBLE) AS salary_min,
                   TRY_CAST(j.salary_max AS DOUBLE) AS salary_max,
-                  TRY_CAST(j.salary_is_predicted AS INTEGER) AS salary_is_predicted
+                  TRY_CAST(j.salary_is_predicted AS INTEGER) AS salary_is_predicted,
+                  extracted_at_utc,
+                  '{run_id_sql}' AS pipeline_run_id
                 FROM jobs
               ),
               geo_map AS (
@@ -548,6 +558,7 @@ def build_jobs_clean_parquet(
         logger.warning("Primary DuckDB jobs COPY failed (%s). Using hybrid path.", exc)
         doc = json.loads(adzuna_path.read_text(encoding="utf-8"))
         results = (doc.get("payload") or {}).get("results") or []
+        extracted_at = doc.get("extracted_at_utc")
         rows: list[dict[str, Any]] = []
         for j in results:
             loc = (j.get("location") or {}).get("display_name")
@@ -574,6 +585,8 @@ def build_jobs_clean_parquet(
                     "salary_min": j.get("salary_min"),
                     "salary_max": j.get("salary_max"),
                     "salary_is_predicted": j.get("salary_is_predicted"),
+                    "extracted_at_utc": extracted_at,
+                    "pipeline_run_id": run_id,
                     "cidade_padronizada": geo.get("cidade", "Remote"),
                     "provincia_padronizada": geo.get("provincia", "Remote"),
                     "cma_padronizada": geo.get("cma", geo.get("cidade", "Remote")),

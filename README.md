@@ -64,6 +64,17 @@ Configure no GitHub Actions:
 O link direto para candidatura está em
 `fct_viabilidade_vagas.url_vaga`.
 
+## Aplicação Streamlit
+
+```powershell
+streamlit run app.py
+```
+
+O app usa `data/gold/parquet/.../latest/` e, quando os arquivos não existem
+localmente, baixa os aliases `latest` do S3. O filtro padrão exibe apenas
+`elegivel_ranking = true`: salário declarado consistente, geografia confiável
+e IVF de qualidade alta.
+
 Para abrir o DuckDB no DBeaver, use conexão read-only. Desconecte o DBeaver
 antes de executar dbt, pois uma conexão de escrita mantém lock no arquivo.
 
@@ -79,3 +90,8 @@ A cascata é:
 Valores estimados incluem `aviso_salario`, `confianca_salario`, NOC, fonte e
 ano de referência. O IVF usa `modelo_fiscal = simplificado_v1`; ele é uma
 estimativa de produto, não aconselhamento fiscal.
+
+Valores preditos pela Adzuna são separados de salários declarados. Benchmarks
+oficiais estatisticamente atípicos são marcados em `salario_oficial_outlier` e
+rebaixados na confiança. A visão de produto contém somente vagas observadas no
+snapshot mais recente; o histórico permanece em `fct_vagas_snapshot`.

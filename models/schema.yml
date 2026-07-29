@@ -8,6 +8,10 @@ models:
         tests: [not_null]
       - name: data_snapshot
         tests: [not_null]
+      - name: extracted_at_utc
+        tests: [not_null]
+      - name: pipeline_run_id
+        tests: [not_null]
       - name: url_vaga
         tests: [not_null]
 
@@ -42,18 +46,24 @@ models:
         tests: [not_null]
 
   - name: fct_viabilidade_vagas
-    description: Visão atual acumulada para consumo pelo produto.
+    description: Visão atual (somente vagas do snapshot mais recente) para o produto.
     columns:
       - name: vaga_id
         tests: [not_null, unique]
       - name: url_vaga
         tests: [not_null]
+      - name: is_current
+        tests:
+          - accepted_values:
+              arguments:
+                values: [true]
       - name: fonte_salario
         tests:
           - accepted_values:
               arguments:
                 values:
                   - declarado
+                  - adzuna_predito
                   - oficial_noc_provincia
                   - oficial_noc_nacional
                   - mercado_cargo_provincia
@@ -67,8 +77,15 @@ models:
           - accepted_values:
               arguments:
                 values: [alta, media, baixa, indisponivel]
+      - name: qualidade_ivf
+        tests:
+          - accepted_values:
+              arguments:
+                values: [alta, media, baixa]
       - name: modelo_fiscal
         tests:
           - accepted_values:
               arguments:
                 values: [simplificado_v1]
+      - name: aviso_modelo_fiscal
+        tests: [not_null]

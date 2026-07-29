@@ -32,6 +32,7 @@ jobs:
       AWS_S3_BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
       # Evita prompts interativos do dbt
       DBT_PROFILES_DIR: .
+      CANADAPT_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       - name: Checkout
@@ -49,7 +50,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Install dbt packages
-        run: python -m dbt deps --profiles-dir .
+        run: dbt deps --profiles-dir .
 
       - name: Prepare data directories
         run: |

@@ -31,5 +31,7 @@ select
     geo_confidence,
     redirect_url as url_vaga,
     cast(created as timestamp) as data_criacao,
+    try_cast(extracted_at_utc as timestamp) as extracted_at_utc,
+    coalesce(pipeline_run_id, 'unknown') as pipeline_run_id,
     make_date(year::integer, month::integer, day::integer) as data_snapshot
 from source

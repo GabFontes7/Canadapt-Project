@@ -1,6 +1,4 @@
-"""
-CanAdapt — Quick Gold validation against the official dbt DuckDB warehouse.
-"""
+"""CanAdapt — validation summary for the current and historical Gold layer."""
 
 from __future__ import annotations
 
@@ -22,130 +20,67 @@ def main() -> int:
     con = duckdb.connect(str(DB_PATH), read_only=True)
 
     try:
-        print("=" * 72)
-        print("1) Linha sintética REMOTE — dim_geografia_custos")
-        print("=" * 72)
-        remote_rows = con.execute(
-            """
-            SELECT
-                sk_geografia,
-                nome_cidade,
-                sigla_provincia,
-                nome_provincia,
-                aluguel_medio_1bdr,
-                custo_vida_sem_aluguel,
-                (aluguel_medio_1bdr + custo_vida_sem_aluguel) AS custo_total_mensal_medio,
-                aliquota_gst,
-                aliquota_pst,
-                aliquota_hst_total
-            FROM main.dim_geografia_custos
-            WHERE upper(nome_cidade) = 'REMOTE'
-               OR upper(sigla_provincia) = 'CANADA'
-            """
-        ).fetchall()
-
-        if not remote_rows:
-            print("Nenhuma linha REMOTE/CANADA encontrada na dimensão.")
-        else:
-            cols = [
-                "sk_geografia",
-                "nome_cidade",
-                "sigla_provincia",
-                "nome_provincia",
-                "aluguel_medio_1bdr",
-                "custo_vida_sem_aluguel",
-                "custo_total_mensal_medio",
-                "aliquota_gst",
-                "aliquota_pst",
-                "aliquota_hst_total",
-            ]
-            for row in remote_rows:
-                for col, val in zip(cols, row):
-                    print(f"  {col}: {val}")
-                print()
+        sections = {
+            "1) Cobertura temporal": """
+                select
+                    (select count(*) from main.fct_viabilidade_vagas) as vagas_atuais,
+                    (select count(*) from main.fct_vagas_snapshot) as observacoes_historicas,
+                    (select count(*) from main.dim_vaga where is_current) as dimensao_atual,
+                    (select count(*) from main.dim_vaga where not is_current) as vagas_fechadas,
+                    (select count(distinct data_snapshot) from main.fct_vagas_snapshot) as snapshots
+            """,
+            "2) Qualidade e cobertura": """
+                select
+                    count(*) filter (where url_vaga is not null) as com_link,
+                    count(*) filter (where noc_code is not null) as com_noc,
+                    count(*) filter (where extracted_at_utc is not null) as com_lineage,
+                    count(*) filter (where elegivel_ranking) as elegiveis_ranking,
+                    count(*) filter (where salario_oficial_outlier) as salarios_outlier,
+                    count(*) filter (
+                        where geo_mapping_method in ('country_generic', 'remote')
+                    ) as geo_generica
+                from main.fct_viabilidade_vagas
+            """,
+        }
+        for title, sql in sections.items():
+            print("=" * 72)
+            print(title)
+            print("=" * 72)
+            frame = con.execute(sql).fetchdf()
+            print(frame.to_string(index=False))
+            print()
 
         print("=" * 72)
-        print("2) Cobertura salarial — fct_viabilidade_vagas")
+        print("3) Fontes salariais e qualidade IVF")
         print("=" * 72)
-        cobertura = con.execute(
-            """
-            SELECT
-                count(*) AS total,
-                count(*) FILTER (WHERE salario_estimado = false) AS declarados,
-                count(*) FILTER (WHERE salario_estimado = true) AS estimados,
-                count(*) FILTER (WHERE fonte_salario = 'mercado_cargo_provincia') AS via_cargo_provincia,
-                count(*) FILTER (WHERE fonte_salario = 'mercado_empresa') AS via_empresa,
-                count(*) FILTER (WHERE fonte_salario = 'mercado_cargo_nacional') AS via_cargo_nacional,
-                count(*) FILTER (WHERE fonte_salario = 'mercado_provincia') AS via_provincia,
-                count(*) FILTER (WHERE fonte_salario = 'mercado_nacional') AS via_nacional,
-                count(*) FILTER (WHERE classificacao_viabilidade = 'Sem Dados Salariais') AS sem_dados
-            FROM main.fct_viabilidade_vagas
-            """
-        ).fetchone()
-        labels = [
-            "total",
-            "declarados",
-            "estimados",
-            "via_cargo_provincia",
-            "via_empresa",
-            "via_cargo_nacional",
-            "via_provincia",
-            "via_nacional",
-            "sem_dados",
-        ]
-        for label, val in zip(labels, cobertura):
-            print(f"  {label}: {val}")
+        print(
+            con.execute(
+                """
+                select fonte_salario, confianca_salario, qualidade_ivf,
+                       elegivel_ranking, count(*) as vagas
+                from main.fct_viabilidade_vagas
+                group by 1, 2, 3, 4
+                order by vagas desc
+                """
+            ).fetchdf().to_string(index=False)
+        )
         print()
 
         print("=" * 72)
-        print("3) Amostra estimada (3 linhas) — fct_viabilidade_vagas")
+        print("4) Top 5 do ranking seguro")
         print("=" * 72)
-        sample_rows = con.execute(
-            """
-            SELECT
-                titulo_cargo,
-                salario_declarado,
-                salario_bruto_anual,
-                familia_cargo,
-                fonte_salario,
-                confianca_salario,
-                motivo_salario_estimado,
-                tamanho_amostra_salario,
-                aviso_salario,
-                classificacao_viabilidade
-            FROM main.fct_viabilidade_vagas
-            WHERE salario_estimado = true
-            LIMIT 3
-            """
-        ).fetchall()
-
-        if not sample_rows:
-            print("Nenhuma vaga com salário estimado.")
-        else:
-            for i, row in enumerate(sample_rows, start=1):
-                (
-                    titulo,
-                    declarado,
-                    bruto,
-                    familia,
-                    fonte,
-                    confianca,
-                    motivo,
-                    amostra,
-                    aviso,
-                    classificacao,
-                ) = row
-                print(f"  [{i}] titulo_cargo: {titulo}")
-                print(f"      salario_declarado: {declarado}")
-                print(f"      salario_bruto_anual: {bruto}*")
-                print(f"      familia_cargo: {familia}")
-                print(f"      fonte_salario: {fonte}")
-                print(f"      confianca_salario: {confianca}")
-                print(f"      motivo_salario_estimado: {motivo}")
-                print(f"      tamanho_amostra_salario: {amostra}")
-                print(f"      aviso_salario: {aviso}")
-                print(f"      classificacao_viabilidade: {classificacao}")
-                print()
+        print(
+            con.execute(
+                """
+                select titulo_cargo, empresa, nome_cidade, sigla_provincia,
+                       salario_bruto_anual, ivf_score, url_vaga
+                from main.fct_viabilidade_vagas
+                where elegivel_ranking
+                order by ivf_score desc
+                limit 5
+                """
+            ).fetchdf().to_string(index=False)
+        )
 
     finally:
         con.close()

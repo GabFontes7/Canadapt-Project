@@ -18,6 +18,8 @@ with historico as (
         geo_confidence,
         url_vaga,
         data_criacao,
+        extracted_at_utc,
+        pipeline_run_id,
         data_snapshot,
         {{ dbt_utils.generate_surrogate_key([
             'titulo_cargo',
@@ -34,6 +36,11 @@ with historico as (
         ]) }} as hash_versao
     from {{ ref('stg_adzuna_jobs') }}
     where vaga_id is not null
+),
+
+snapshot_atual as (
+    select max(data_snapshot) as data_snapshot_atual
+    from historico
 ),
 
 mudancas as (
@@ -79,6 +86,8 @@ versoes as (
         arg_max(geo_mapping_method, data_snapshot) as geo_mapping_method,
         arg_max(geo_confidence, data_snapshot) as geo_confidence,
         arg_max(url_vaga, data_snapshot) as url_vaga,
+        arg_max(extracted_at_utc, data_snapshot) as extracted_at_utc,
+        arg_max(pipeline_run_id, data_snapshot) as pipeline_run_id,
         min(data_criacao) as data_criacao,
         min(data_snapshot) as valid_from,
         max(data_snapshot) as last_seen_at
@@ -88,11 +97,25 @@ versoes as (
 
 intervalos as (
     select
+        v.*,
+        lead(v.valid_from) over (
+            partition by v.vaga_id order by v.numero_versao
+        ) as valid_to_por_versao,
+        s.data_snapshot_atual
+    from versoes v
+    cross join snapshot_atual s
+),
+
+fechado as (
+    select
         *,
-        lead(valid_from) over (
-            partition by vaga_id order by numero_versao
-        ) as valid_to
-    from versoes
+        case
+            when valid_to_por_versao is not null then valid_to_por_versao
+            -- Ausente no snapshot mais recente: fecha a vigência na data atual.
+            when last_seen_at < data_snapshot_atual then data_snapshot_atual
+            else null
+        end as valid_to
+    from intervalos
 )
 
 select
@@ -116,8 +139,11 @@ select
     geo_confidence,
     url_vaga,
     data_criacao,
+    extracted_at_utc,
+    pipeline_run_id,
     valid_from,
     valid_to,
     last_seen_at,
-    valid_to is null as is_current
-from intervalos
+    data_snapshot_atual,
+    (valid_to is null and last_seen_at = data_snapshot_atual) as is_current
+from fechado

@@ -15,18 +15,22 @@ with jobs as (
         geo_confidence,
         url_vaga,
         data_criacao,
+        extracted_at_utc,
+        pipeline_run_id,
+        data_snapshot,
         min(data_snapshot) over (partition by vaga_id) as first_seen_at,
         max(data_snapshot) over (partition by vaga_id) as last_seen_at,
+        max(data_snapshot) over () as data_snapshot_atual,
         row_number() over (
             partition by vaga_id
             order by data_snapshot desc, data_criacao desc nulls last
         ) as rn,
         case
-            when lower(cidade_padronizada) = 'remote' then 'REMOTE'
-            else cidade_padronizada
+            when lower(cma_padronizada) = 'remote' then 'REMOTE'
+            else cma_padronizada
         end as cidade_chave,
         case
-            when lower(cidade_padronizada) = 'remote'
+            when lower(cma_padronizada) = 'remote'
               or lower(provincia_padronizada) = 'remote'
             then 'CANADA'
             else provincia_padronizada
@@ -52,7 +56,12 @@ select
     geo_confidence,
     url_vaga,
     data_criacao,
+    extracted_at_utc,
+    pipeline_run_id,
     first_seen_at,
-    last_seen_at
+    last_seen_at,
+    true as is_current
 from jobs
+-- Produto consome apenas vagas observadas no snapshot mais recente.
 where rn = 1
+  and last_seen_at = data_snapshot_atual

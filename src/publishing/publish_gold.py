@@ -107,13 +107,18 @@ def main() -> int:
                 local_path, rows = _export_table(con, table, partition)
                 s3_key = f"gold/{table}/{partition_key}/{table}.parquet"
                 s3.upload_file(str(local_path), bucket, s3_key)
+                latest_key = f"gold/{table}/latest/{table}.parquet"
+                s3.upload_file(str(local_path), bucket, latest_key)
                 logger.info(
-                    "Gold published | table=%s | rows=%d | local=%s | s3=s3://%s/%s",
+                    "Gold published | table=%s | rows=%d | local=%s | "
+                    "s3=s3://%s/%s | latest=s3://%s/%s",
                     table,
                     rows,
                     local_path,
                     bucket,
                     s3_key,
+                    bucket,
+                    latest_key,
                 )
                 total_rows += rows
 

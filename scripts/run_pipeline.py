@@ -25,6 +25,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import duckdb
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUN_EVENTS: list[dict] = []
 
@@ -59,11 +61,65 @@ def _run(label: str, command: list[str], *, skip: bool = False) -> None:
         raise
 
 
+def _collect_quality_metrics() -> tuple[dict, list[str]]:
+    db_path = PROJECT_ROOT / "data" / "gold" / "canadapt_analytics.duckdb"
+    metrics: dict = {}
+    alerts: list[str] = []
+    if not db_path.exists():
+        return metrics, ["Gold DuckDB not found for quality metrics"]
+
+    try:
+        with duckdb.connect(str(db_path), read_only=True) as con:
+            row = con.execute(
+                """
+                select
+                    count(*) as vagas_atuais,
+                    count(*) filter (where elegivel_ranking) as elegiveis_ranking,
+                    count(*) filter (where noc_code is null) as sem_noc,
+                    count(*) filter (where salario_oficial_outlier) as salarios_outlier,
+                    count(*) filter (
+                        where geo_mapping_method in ('country_generic', 'remote')
+                    ) as geo_generica,
+                    count(*) filter (where qualidade_ivf = 'baixa') as ivf_baixa
+                from main.fct_viabilidade_vagas
+                """
+            ).fetchone()
+            keys = (
+                "vagas_atuais",
+                "elegiveis_ranking",
+                "sem_noc",
+                "salarios_outlier",
+                "geo_generica",
+                "ivf_baixa",
+            )
+            metrics.update(dict(zip(keys, row)))
+            metrics["vagas_historicas"] = con.execute(
+                "select count(*) from main.fct_vagas_snapshot"
+            ).fetchone()[0]
+            metrics["vagas_fechadas"] = con.execute(
+                "select count(*) from main.dim_vaga where not is_current"
+            ).fetchone()[0]
+    except duckdb.Error as exc:
+        return metrics, [f"Could not collect Gold metrics: {exc}"]
+
+    total = metrics.get("vagas_atuais", 0)
+    eligible = metrics.get("elegiveis_ranking", 0)
+    metrics["pct_elegivel_ranking"] = round(100 * eligible / total, 2) if total else 0
+    if metrics.get("sem_noc", 0):
+        alerts.append(f"{metrics['sem_noc']} current jobs without NOC")
+    if metrics.get("salarios_outlier", 0):
+        alerts.append(f"{metrics['salarios_outlier']} official salary outliers")
+    if total and metrics["pct_elegivel_ranking"] < 5:
+        alerts.append("Less than 5% of current jobs are ranking-eligible")
+    return metrics, alerts
+
+
 def _write_run_manifest(status: str) -> Path:
     run_id = os.environ.get("CANADAPT_RUN_ID", "unknown")
     out_dir = PROJECT_ROOT / "data" / "metadata" / "runs"
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{run_id}.json"
+    metrics, alerts = _collect_quality_metrics()
     path.write_text(
         json.dumps(
             {
@@ -71,6 +127,8 @@ def _write_run_manifest(status: str) -> Path:
                 "status": status,
                 "finished_at_utc": datetime.now(timezone.utc).isoformat(),
                 "steps": RUN_EVENTS,
+                "quality_metrics": metrics,
+                "alerts": alerts,
             },
             ensure_ascii=False,
             indent=2,
@@ -122,6 +180,11 @@ def main() -> int:
         "Ingestao salarios oficiais -> Bronze",
         [python, "src/ingestion/ingest_wages.py"],
         skip=args.skip_wages,
+    )
+    _run(
+        "Contratos Bronze",
+        [python, "src/quality/validate_bronze.py"],
+        skip=args.skip_adzuna and args.skip_col and args.skip_wages,
     )
     _run(
         "Processamento Silver",

@@ -33,6 +33,7 @@ unificado as (
 select
     {{ dbt_utils.generate_surrogate_key(['nome_cidade', 'sigla_provincia']) }} as sk_geografia,
     nome_cidade,
+    nome_cidade as cma_padronizada,
     sigla_provincia,
     nome_provincia,
     aluguel_medio_1bdr,
