@@ -3,9 +3,23 @@
 .env.*
 !.env.example
 
-# Local data lake (Bronze dual-write)
+# Local data lake — artefatos de dados (regeneráveis, grandes)
 data/bronze/**
 !data/bronze/.gitkeep
+data/silver/**
+!data/silver/.gitkeep
+data/gold/**
+!data/gold/.gitkeep
+
+# DuckDB (bancos analíticos, incl. duplicados soltos)
+*.duckdb
+*.duckdb.wal
+
+# dbt build outputs
+target/
+dbt_packages/
+logs/
+.user.yml
 
 # Python
 __pycache__/
