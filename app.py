@@ -31,13 +31,15 @@ AWS_SECRET_KEYS = (
 def _apply_runtime_secrets() -> None:
     """Load .env locally and Streamlit Cloud secrets into os.environ."""
     load_dotenv(ROOT / ".env")
-    try:
-        secrets = st.secrets
-    except Exception:  # noqa: BLE001
-        return
     for key in AWS_SECRET_KEYS:
-        if key in secrets and not os.getenv(key, "").strip():
-            os.environ[key] = str(secrets[key]).strip()
+        if os.getenv(key, "").strip():
+            continue
+        # Reading st.secrets raises when no secrets file is configured.
+        try:
+            value = st.secrets[key]
+        except Exception:  # noqa: BLE001
+            continue
+        os.environ[key] = str(value).strip()
 
 
 _apply_runtime_secrets()
