@@ -2,6 +2,7 @@ with jobs as (
     select
         vaga_id,
         titulo_cargo,
+        descricao_vaga,
         salario_bruto_anual,
         salario_bruto_anual_maximo,
         salario_adzuna_estimado,
@@ -67,6 +68,7 @@ select
     vaga_id,
     {{ dbt_utils.generate_surrogate_key(['cidade_chave', 'provincia_chave']) }} as sk_geografia,
     titulo_cargo,
+    descricao_vaga,
     salario_bruto_anual,
     salario_bruto_anual_maximo,
     salario_adzuna_estimado,

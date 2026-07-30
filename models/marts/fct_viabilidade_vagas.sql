@@ -25,6 +25,7 @@ joined as (
     select
         f.vaga_id,
         f.titulo_cargo,
+        f.descricao_vaga,
         f.empresa,
         f.noc_code,
         f.noc_title,
@@ -607,6 +608,7 @@ qualidade as (
 select
     vaga_id,
     titulo_cargo,
+    descricao_vaga,
     empresa,
     url_vaga,
     data_criacao,

@@ -1,9 +1,10 @@
 """
 CanAdapt — Bronze ingestion (local + AWS S3 Dual-Write).
 
-Pulls Adzuna Canada ads focused on visa sponsorship / LMIA / relocation,
-retries transient API failures, then writes the same Hive-partitioned JSON
-locally and to S3 (Dual-Write). Profession categorization happens in later layers.
+Pulls Adzuna Canada ads focused on visa sponsorship / LMIA / relocation across
+several complementary queries (multi-sector plus IT/data heavy ones), retries
+transient API failures, then writes the same Hive-partitioned JSON locally and
+to S3 (Dual-Write). Profession categorization happens in later layers.
 """
 
 from __future__ import annotations
@@ -37,6 +38,38 @@ ADZUNA_SEARCH_URL = "https://api.adzuna.com/v1/api/jobs/ca/search/{page}"
 # Native Adzuna params: sponsorship focus + broader visa signals via what_or.
 SEARCH_WHAT = "visa sponsorship"
 SEARCH_WHAT_OR = "LMIA sponsorship relocation"
+MOBILITY_WHAT_OR = "LMIA sponsorship relocation visa"
+
+# Complementary queries: every one keeps the mobility signal, but the IT-focused
+# ones raise the share of tech/data roles, which the multi-sector query alone
+# barely reaches.
+QUERY_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        "label": "mobilidade_multissetor",
+        "max_pages": 3,
+        "params": {"what": SEARCH_WHAT, "what_or": SEARCH_WHAT_OR},
+    },
+    {
+        "label": "tech_mobilidade",
+        "max_pages": 6,
+        "params": {"category": "it-jobs", "what_or": MOBILITY_WHAT_OR},
+    },
+    # Same universe as tech_mobilidade, but ranked by relevance to "data" so the
+    # data roles that fall outside the newest pages still get picked up.
+    {
+        "label": "dados_mobilidade",
+        "max_pages": 2,
+        "params": {
+            "category": "it-jobs",
+            "what": "data",
+            "what_or": MOBILITY_WHAT_OR,
+            "sort_by": "relevance",
+        },
+    },
+)
+
+# Caps the Gemini enrichment cost of a single run.
+MAX_JOBS_PER_RUN = int(os.getenv("CANADAPT_MAX_JOBS_PER_RUN", "500"))
 
 RESULTS_PER_PAGE = 50
 MAX_DAYS_OLD = 7  # weekly cadence
@@ -104,17 +137,17 @@ def _request_page(
     app_id: str,
     app_key: str,
     page: int,
+    query_params: dict[str, Any],
 ) -> dict[str, Any]:
-    """GET one Adzuna page using native visa-focused params."""
+    """GET one Adzuna page for a given query spec."""
     params = {
         "app_id": app_id,
         "app_key": app_key,
-        "what": SEARCH_WHAT,
-        "what_or": SEARCH_WHAT_OR,
         "results_per_page": RESULTS_PER_PAGE,
         "max_days_old": MAX_DAYS_OLD,
         "sort_by": "date",
         "content-type": "application/json",
+        **query_params,
     }
     url = ADZUNA_SEARCH_URL.format(page=page)
     last_error: Exception | None = None
@@ -193,73 +226,150 @@ def _request_page(
     raise last_error
 
 
-def fetch_adzuna_jobs(
+def fetch_query(
     session: requests.Session,
     app_id: str,
     app_key: str,
+    spec: dict[str, Any],
 ) -> dict[str, Any]:
-    """Fetch all pages for the sponsorship-focused query (last MAX_DAYS_OLD)."""
+    """Fetch up to spec['max_pages'] pages for one query spec."""
+    label = spec["label"]
+    query_params = spec["params"]
+    max_pages = int(spec.get("max_pages") or 1)
+
     logger.info(
-        "Fetching Adzuna CA | what=%r | what_or=%r | max_days_old=%d",
-        SEARCH_WHAT,
-        SEARCH_WHAT_OR,
+        "Fetching Adzuna CA | query=%s | params=%r | max_days_old=%d",
+        label,
+        query_params,
         MAX_DAYS_OLD,
     )
 
-    first = _request_page(session, app_id, app_key, page=1)
+    first = _request_page(session, app_id, app_key, 1, query_params)
     total_count = int(first.get("count") or 0)
-    pages = max(1, math.ceil(total_count / RESULTS_PER_PAGE)) if total_count else 1
+    available = max(1, math.ceil(total_count / RESULTS_PER_PAGE)) if total_count else 1
+    pages = min(available, max_pages)
 
     all_results: list[dict[str, Any]] = list(first.get("results") or [])
     page_payloads: list[dict[str, Any]] = [first]
 
     logger.info(
-        "Page 1/%d | api_count=%d | page_results=%d",
+        "%s | page 1/%d | api_count=%d | page_results=%d",
+        label,
         pages,
         total_count,
-        len(first.get("results") or []),
+        len(all_results),
     )
 
     for page in range(2, pages + 1):
         time.sleep(PAUSE_BETWEEN_REQUESTS_SECONDS)
-        payload = _request_page(session, app_id, app_key, page=page)
+        payload = _request_page(session, app_id, app_key, page, query_params)
         page_results = list(payload.get("results") or [])
         all_results.extend(page_results)
         page_payloads.append(payload)
         logger.info(
-            "Page %d/%d | page_results=%d | accumulated=%d",
+            "%s | page %d/%d | page_results=%d | accumulated=%d",
+            label,
             page,
             pages,
             len(page_results),
             len(all_results),
         )
 
-    unique: dict[str, dict[str, Any]] = {}
-    for job in all_results:
-        job_id = str(job.get("id") or "")
-        if job_id and job_id not in unique:
-            unique[job_id] = job
-    deduped = list(unique.values()) if unique else all_results
+    return {
+        "label": label,
+        "params": query_params,
+        "api_count": total_count,
+        "pages_available": available,
+        "pages_fetched": pages,
+        "results_fetched": len(all_results),
+        "mean": first.get("mean"),
+        "results": all_results,
+        "raw_pages": page_payloads,
+    }
 
+
+def fetch_adzuna_jobs(
+    session: requests.Session,
+    app_id: str,
+    app_key: str,
+) -> dict[str, Any]:
+    """Run every query spec and merge the ads into one deduplicated payload."""
+    blocks: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+
+    for index, spec in enumerate(QUERY_SPECS):
+        if index:
+            time.sleep(PAUSE_BETWEEN_REQUESTS_SECONDS)
+        try:
+            blocks.append(fetch_query(session, app_id, app_key, spec))
+        except (ConnectionError, RuntimeError) as exc:
+            logger.error("Query %s failed: %s", spec["label"], exc)
+            errors.append({"query": spec["label"], "error": str(exc)})
+
+    if not blocks:
+        raise RuntimeError(
+            "Every Adzuna query failed. "
+            f"First error: {errors[0]['error'] if errors else 'unknown'}"
+        )
+
+    unique: dict[str, dict[str, Any]] = {}
+    fetched = 0
+    for block in blocks:
+        for job in block["results"]:
+            fetched += 1
+            job_id = str(job.get("id") or "")
+            if not job_id or job_id in unique:
+                continue
+            job["canadapt_query"] = block["label"]
+            unique[job_id] = job
+
+    deduped = list(unique.values())
+    if len(deduped) > MAX_JOBS_PER_RUN:
+        logger.info(
+            "Capping run at %d ads (deduped=%d) to bound enrichment cost.",
+            MAX_JOBS_PER_RUN,
+            len(deduped),
+        )
+        deduped = deduped[:MAX_JOBS_PER_RUN]
+
+    per_query = {
+        block["label"]: sum(
+            1 for job in deduped if job.get("canadapt_query") == block["label"]
+        )
+        for block in blocks
+    }
     logger.info(
-        "Fetch complete | api_count=%d | fetched=%d | unique=%d | pages=%d",
-        total_count,
-        len(all_results),
+        "Fetch complete | queries=%d | fetched=%d | unique=%d | per_query=%s",
+        len(blocks),
+        fetched,
         len(deduped),
-        pages,
+        per_query,
     )
 
     return {
         "what": SEARCH_WHAT,
         "what_or": SEARCH_WHAT_OR,
         "max_days_old": MAX_DAYS_OLD,
-        "api_count": total_count,
-        "pages_fetched": pages,
-        "results_fetched": len(all_results),
+        "queries": [
+            {
+                "label": block["label"],
+                "params": block["params"],
+                "api_count": block["api_count"],
+                "pages_available": block["pages_available"],
+                "pages_fetched": block["pages_fetched"],
+                "results_fetched": block["results_fetched"],
+                "results_kept": per_query.get(block["label"], 0),
+            }
+            for block in blocks
+        ],
+        "query_errors": errors,
+        "api_count": sum(block["api_count"] for block in blocks),
+        "pages_fetched": sum(block["pages_fetched"] for block in blocks),
+        "results_fetched": fetched,
         "results_unique": len(deduped),
-        "mean": first.get("mean"),
+        "mean": blocks[0].get("mean"),
         "results": deduped,
-        "raw_pages": page_payloads,
+        "raw_pages": [page for block in blocks for page in block["raw_pages"]],
     }
 
 
@@ -372,6 +482,7 @@ def build_bronze_document(
         "max_days_old": MAX_DAYS_OLD,
         "what": SEARCH_WHAT,
         "what_or": SEARCH_WHAT_OR,
+        "queries": block.get("queries") or [],
         "results_per_page": RESULTS_PER_PAGE,
         "total_results_fetched": block.get("results_fetched") or 0,
         "total_results_unique": block.get("results_unique") or 0,

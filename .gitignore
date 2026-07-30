@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+.streamlit/secrets.toml
 
 # Local data lake — artefatos de dados (regeneráveis, grandes)
 data/bronze/**

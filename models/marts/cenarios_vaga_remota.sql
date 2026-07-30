@@ -6,6 +6,7 @@ with remotas as (
     select
         vaga_id,
         titulo_cargo,
+        descricao_vaga,
         empresa,
         url_vaga,
         data_criacao,
@@ -248,6 +249,7 @@ select
         as sk_cenario_remoto,
     vaga_id,
     titulo_cargo,
+    descricao_vaga,
     empresa,
     url_vaga,
     data_criacao,

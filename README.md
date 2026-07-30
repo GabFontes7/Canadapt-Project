@@ -25,6 +25,13 @@ O pipeline coleta os últimos sete dias semanalmente e **acrescenta** a nova
 partição ao histórico. O modelo `fct_vagas_snapshot` mantém as observações por
 data; `dim_vaga` mantém as versões SCD2 (`valid_from`, `valid_to`, `is_current`).
 
+A ingestão Adzuna roda três consultas complementares, todas exigindo sinal de
+mobilidade (LMIA, patrocínio, relocação ou visto): uma multissetorial, uma na
+categoria `it-jobs` ordenada por data e uma na mesma categoria ordenada por
+relevância para "data". Os anúncios são deduplicados por `id` e o volume de cada
+execução é limitado por `CANADAPT_MAX_JOBS_PER_RUN` (padrão 500) para conter o
+custo de enriquecimento.
+
 ## Execução local
 
 Requer Python 3.11 e um `.env` baseado em `.env.example`.
@@ -32,10 +39,13 @@ Requer Python 3.11 e um `.env` baseado em `.env.example`.
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements-pipeline.txt
 dbt deps --profiles-dir .
 python scripts\run_pipeline.py
 ```
+
+`requirements.txt` é enxuto (só o portal Streamlit). O pipeline usa
+`requirements-pipeline.txt`.
 
 O orquestrador executa ingestões, Silver, enriquecimento NOC, `dbt run`,
 `dbt test`, publicação Gold e validação. Cada execução recebe um `run_id` e
@@ -67,6 +77,7 @@ O link direto para candidatura está em
 ## Aplicação Streamlit
 
 ```powershell
+pip install -r requirements.txt
 streamlit run app.py
 ```
 
@@ -74,6 +85,38 @@ O app usa `data/gold/parquet/.../latest/` e, quando os arquivos não existem
 localmente, baixa os aliases `latest` do S3. O filtro padrão exibe apenas
 `ranking_confiavel = true`: salário declarado consistente, localização
 confiável e cálculo estimado de alta confiança.
+
+### Publicar no Streamlit Community Cloud (gratuito)
+
+Arquitetura:
+
+```text
+GitHub Actions (semanal) → escreve Gold no S3
+Streamlit Community Cloud → lê Gold latest do S3
+```
+
+1. Faça push do código para o GitHub (`main`).
+2. Acesse [share.streamlit.io](https://share.streamlit.io) e entre com GitHub.
+3. **Create app** → repositório `Canadapt-Project` → branch `main` → arquivo `app.py`.
+4. Em **Advanced settings → Secrets**, cole (modelo em
+   `.streamlit/secrets.toml.example`):
+
+```toml
+AWS_ACCESS_KEY_ID = "..."
+AWS_SECRET_ACCESS_KEY = "..."
+AWS_DEFAULT_REGION = "us-east-1"
+AWS_BUCKET_NAME = "canadapt-data-lake"
+AWS_S3_BUCKET_NAME = "canadapt-data-lake"
+```
+
+5. Deploy. A URL fica no formato `https://<nome>.streamlit.app`.
+
+A app **não** precisa de Adzuna nem Gemini — só leitura do S3. Idealmente a
+chave AWS usada no Streamlit tem permissão apenas de leitura em
+`s3://canadapt-data-lake/gold/`.
+
+Após ~12h sem visitas a app hiberna; no próximo acesso ela acorda sozinha
+(pode levar alguns segundos).
 
 Para abrir o DuckDB no DBeaver, use conexão read-only. Desconecte o DBeaver
 antes de executar dbt, pois uma conexão de escrita mantém lock no arquivo.
