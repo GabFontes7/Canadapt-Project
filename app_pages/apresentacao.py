@@ -24,11 +24,24 @@ def _kpis() -> tuple[int | None, int | None, str | None]:
 
 
 st.badge("Portal de decisão · Canadá", color="red", icon=":material/public:")
-st.title("CanAdapt")
-st.markdown(
-    "Vagas canadenses com sinal de **mobilidade** — visto, LMIA ou relocação — "
-    "e uma estimativa transparente do que pode **sobrar no fim do mês**."
-)
+hero, convite = st.columns([2.2, 1], vertical_alignment="center")
+with hero:
+    st.title("🍁 CanAdapt")
+    st.markdown(
+        "Vagas canadenses com sinal de **mobilidade** — visto, LMIA ou relocação — "
+        "e uma estimativa transparente do que pode **sobrar no fim do mês**."
+    )
+with convite:
+    with st.container(border=True):
+        st.caption("Comece por aqui")
+        if st.button(
+            "Ver vagas no Canadá",
+            type="primary",
+            icon=":material/work:",
+            width="stretch",
+        ):
+            st.switch_page("app_pages/vagas.py")
+        st.caption("Abre o ranking da coleta atual.")
 
 vagas, ranking, atualizado = _kpis()
 k1, k2, k3 = st.columns(3)
@@ -40,13 +53,6 @@ k2.metric(
     help="Só entram anúncios com salário declarado e localização confiável.",
 )
 k3.metric("Última coleta", atualizado or "—", border=True)
-
-st.page_link(
-    "app_pages/vagas.py",
-    label="Explorar vagas",
-    icon=":material/work:",
-    width="stretch",
-)
 
 st.subheader("Para quem é")
 st.write(

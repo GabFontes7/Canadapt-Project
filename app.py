@@ -34,7 +34,7 @@ _apply_runtime_secrets()
 
 st.set_page_config(
     page_title="CanAdapt — vagas no Canadá",
-    page_icon=":material/public:",
+    page_icon="🍁",
     layout="wide",
 )
 
