@@ -114,10 +114,11 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-O app usa `data/gold/parquet/.../latest/` e, quando os arquivos não existem
-localmente, baixa os aliases `latest` do S3. O filtro padrão exibe apenas
-`ranking_confiavel = true`: salário declarado consistente, localização
-confiável e cálculo estimado de alta confiança.
+O app abre na **apresentação** do projeto e tem a página **Explorar vagas**.
+Usa `data/gold/parquet/.../latest/` e, quando os arquivos não existem
+localmente, baixa os aliases `latest` do S3. O filtro padrão das vagas
+exibe apenas `ranking_confiavel = true`: salário declarado consistente,
+localização confiável e cálculo estimado de alta confiança.
 
 ### Publicar no Streamlit Community Cloud (gratuito)
 
