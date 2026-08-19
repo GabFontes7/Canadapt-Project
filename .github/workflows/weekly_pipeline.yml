@@ -4,6 +4,8 @@ on:
   schedule:
     # Toda segunda às 12:00 UTC ≈ 09:00 Brasília (UTC-3)
     - cron: "0 12 * * 1"
+    # 19/08/2026 ao meio-dia de Brasília (15:00 UTC) — evidência de run agendado
+    - cron: "0 15 19 8 *"
   workflow_dispatch:
     inputs:
       silver_partition:

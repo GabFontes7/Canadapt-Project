@@ -75,13 +75,16 @@ grava um manifesto em `data/metadata/runs/`.
 
 ## Automação
 
-`.github/workflows/weekly_pipeline.yml` roda toda segunda-feira às 12:00 UTC e
-também permite execução manual. Antes da carga, o runner restaura caches,
-wages e as partições hive dos últimos `CANADAPT_LAKE_RETENTION_DAYS` dias
-(`scripts/restore_lake_slice.py`). Não baixa o Silver inteiro.
+`.github/workflows/weekly_pipeline.yml` roda toda segunda-feira às 12:00 UTC
+(09:00 Brasília) e, em 19 de agosto, também ao meio-dia de Brasília
+(15:00 UTC) para evidência de execução agendada. Permite `workflow_dispatch`.
+Antes da carga, o runner restaura caches, wages e as partições hive dos
+últimos `CANADAPT_LAKE_RETENTION_DAYS` dias (`scripts/restore_lake_slice.py`).
 
-Lifecycle S3 (expira Bronze de vagas/Jooble/CoL e Silver de jobs/CoL após
-90 dias; mantém wages, `silver/metadata` e Gold):
+Lifecycle S3 (`infra/s3_lifecycle.json`): a AWS avalia as regras **todo dia**
+e apaga objetos com mais de 90 dias em Bronze (vagas/Jooble/CoL) e Silver
+(jobs/CoL). Wages, `silver/metadata` e Gold não expiram. Não é um cron de 90
+dias; é idade do objeto. Aplicar no bucket:
 
 ```bash
 aws s3api put-bucket-lifecycle-configuration --bucket canadapt-data-lake-gf --lifecycle-configuration file://infra/s3_lifecycle.json

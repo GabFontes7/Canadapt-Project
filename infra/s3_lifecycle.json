@@ -1,6 +1,12 @@
 {
   "Rules": [
     {
+      "ID": "abort-incomplete-multipart-7d",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    },
+    {
       "ID": "expire-bronze-adzuna-90d",
       "Status": "Enabled",
       "Filter": { "Prefix": "bronze/year=" },
