@@ -247,6 +247,11 @@ def main() -> int:
         [python, "src/processing/enrich_salary_research.py"],
         skip=args.skip_enrich,
     )
+    _run(
+        "Normalizar schema Silver jobs",
+        [python, "src/processing/normalize_silver_jobs.py"],
+        skip=args.skip_dbt,
+    )
 
     _run(
         "dbt seed -> referencias oficiais",
