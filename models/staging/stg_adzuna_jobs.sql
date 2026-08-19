@@ -2,10 +2,19 @@
 
 with source as (
     select *
-    from read_parquet(
-        '{{ var("silver_jobs_root") }}/{{ partition }}/jobs_clean.parquet',
-        hive_partitioning = true,
-        union_by_name = true
+    from (
+        select *
+        from read_parquet(
+            '{{ var("silver_jobs_root") }}/{{ partition }}/jobs_clean.parquet',
+            hive_partitioning = true,
+            union_by_name = true
+        )
+        union all by name
+        select
+            null::varchar as data_contract_version,
+            null::varchar as silver_jobs_schema_version,
+            null::varchar as geo_prompt_version
+        where 1 = 0
     )
 )
 
