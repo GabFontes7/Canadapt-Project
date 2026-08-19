@@ -53,6 +53,7 @@ AREA_LABELS = {
     "operacoes_logistica": "Operações e logística",
     "produto_projetos": "Produto e projetos",
     "financas_conformidade": "Finanças e conformidade",
+    "financas_bancario": "Bancos, risco e operações financeiras",
     "educacao": "Educação",
     "saude": "Saúde",
     "outros": "Outras áreas",
@@ -223,7 +224,14 @@ def render_vaga(row: pd.Series, *, contexto_remoto: str | None = None) -> None:
         with info:
             st.markdown(f"##### {titulo}")
             local = contexto_remoto or local_da_vaga(row)
-            st.caption(f"{empresa}  ·  {local}")
+            fonte = row.get("fonte_vaga")
+            site_origem = row.get("site_origem")
+            origem = ""
+            if pd.notna(site_origem) and str(site_origem).strip():
+                origem = f"  ·  via {str(site_origem).strip()}"
+            elif pd.notna(fonte) and str(fonte).strip():
+                origem = f"  ·  via {str(fonte).strip().title()}"
+            st.caption(f"{empresa}  ·  {local}{origem}")
 
             with st.container(horizontal=True, gap="small"):
                 st.badge(viab_texto, color=viab_cor)

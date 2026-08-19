@@ -13,6 +13,11 @@ from pathlib import Path
 import duckdb
 from pydantic import BaseModel, Field
 
+from pipeline_policy import (
+    NOC_PROMPT_VERSION,
+    allow_gemini_degraded,
+    write_step_metrics,
+)
 from process_silver import call_gemini_with_fallback, load_env, upload_file_to_s3
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -20,7 +25,6 @@ SILVER_ROOT = PROJECT_ROOT / "data" / "silver"
 NOC_CACHE_PATH = SILVER_ROOT / "metadata" / "noc_cache.json"
 NOC_BATCH_SIZE = 25
 NOC_CACHE_VERSION = 2
-NOC_PROMPT_VERSION = "noc_context_v2"
 NOC_RECLASSIFY_BELOW_CONFIDENCE = 0.65
 
 logging.basicConfig(
@@ -197,8 +201,10 @@ def _map_new_titles(
                 system_instruction=NOC_SYSTEM_INSTRUCTION,
             )
         except RuntimeError as exc:
-            logger.error(
-                "NOC batch failed after all fallbacks | start=%d | size=%d | %s",
+            if not allow_gemini_degraded():
+                raise
+            logger.warning(
+                "NOC batch skipped (Gemini unavailable) | start=%d | size=%d | %s",
                 start,
                 len(batch),
                 exc,
@@ -371,6 +377,12 @@ def main() -> int:
             cache.update(new_mappings)
             _save_cache(cache)
             rows = _rewrite_jobs(con, jobs_path, cache)
+            still_missing = [
+                item["context_id"]
+                for item in missing
+                if item["context_id"] not in cache
+            ]
+            noc_degraded = bool(still_missing)
 
         year, month, day = _partition_tuple(jobs_path)
         jobs_key = (
@@ -383,15 +395,29 @@ def main() -> int:
         )
         logger.info(
             "NOC enrichment complete | rows=%d | contexts=%d | cache_hits=%d | "
-            "migrated=%d | new=%d | model=%s | jobs_s3=%s | cache_s3=%s",
+            "migrated=%d | new=%d | model=%s | degraded=%s | jobs_s3=%s | cache_s3=%s",
             rows,
             len(contexts),
             len(contexts) - len(missing),
             migrated,
             len(new_mappings),
             model_used or "cache-only",
+            noc_degraded,
             jobs_s3,
             cache_s3,
+        )
+        write_step_metrics(
+            "enrich_jobs",
+            {
+                "status": "degraded" if noc_degraded else "success",
+                "degraded": noc_degraded,
+                "rows": rows,
+                "cache_hits": len(contexts) - len(missing),
+                "gemini_calls": len(new_mappings),
+                "skipped_contexts": len(still_missing),
+                "model": model_used or "cache-only",
+                "noc_prompt_version": NOC_PROMPT_VERSION,
+            },
         )
         return 0
     except (duckdb.Error, OSError, RuntimeError, ValueError) as exc:

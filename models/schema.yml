@@ -6,13 +6,25 @@ models:
 
   - name: stg_adzuna_jobs
 
-    description: Histórico append-only das partições Silver de vagas.
+    description: Histórico append-only das partições Silver multifuente (Adzuna + Jooble). Inclui data_contract_version a partir do contrato 1.1.0; partições antigas recebem pre-contract.
 
     columns:
 
       - name: vaga_id
 
         tests: [not_null]
+
+      - name: fonte_vaga
+
+        tests:
+
+          - not_null
+
+          - accepted_values:
+
+              arguments:
+
+                values: [adzuna, jooble]
 
       - name: data_snapshot
 
@@ -25,6 +37,14 @@ models:
       - name: pipeline_run_id
 
         tests: [not_null]
+
+      - name: data_contract_version
+
+        description: Versão do contrato Silver/Gold gravada na partição (ou pre-contract no histórico legado).
+
+      - name: geo_prompt_version
+
+        description: Versão do prompt de padronização geográfica.
 
       - name: url_vaga
 

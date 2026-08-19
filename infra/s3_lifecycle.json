@@ -1,0 +1,34 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-bronze-adzuna-90d",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "bronze/year=" },
+      "Expiration": { "Days": 90 }
+    },
+    {
+      "ID": "expire-bronze-jooble-90d",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "bronze/jooble/" },
+      "Expiration": { "Days": 90 }
+    },
+    {
+      "ID": "expire-bronze-col-90d",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "bronze/cost_of_living/" },
+      "Expiration": { "Days": 90 }
+    },
+    {
+      "ID": "expire-silver-jobs-90d",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "silver/jobs/" },
+      "Expiration": { "Days": 90 }
+    },
+    {
+      "ID": "expire-silver-col-90d",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "silver/cost_of_living/" },
+      "Expiration": { "Days": 90 }
+    }
+  ]
+}

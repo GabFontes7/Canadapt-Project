@@ -24,6 +24,7 @@ jobs:
     env:
       ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
       ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
+      JOOBLE_API_KEY: ${{ secrets.JOOBLE_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -33,6 +34,8 @@ jobs:
       # Evita prompts interativos do dbt
       DBT_PROFILES_DIR: .
       CANADAPT_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+      CANADAPT_LAKE_RETENTION_DAYS: "90"
+      CANADAPT_ALLOW_GEMINI_DEGRADED: "1"
 
     steps:
       - name: Checkout
@@ -56,11 +59,8 @@ jobs:
         run: |
           mkdir -p data/bronze data/silver data/gold data/silver/metadata
 
-      - name: Restore Silver history from S3
-        run: |
-          BUCKET="${AWS_BUCKET_NAME:-$AWS_S3_BUCKET_NAME}"
-          aws s3 sync "s3://${BUCKET}/bronze/wages/" data/bronze/wages/ --only-show-errors
-          aws s3 sync "s3://${BUCKET}/silver/" data/silver/ --only-show-errors
+      - name: Restore recent lake slice from S3
+        run: python scripts/restore_lake_slice.py
 
       - name: Run CanAdapt pipeline
         env:
@@ -73,7 +73,7 @@ jobs:
           python scripts/run_pipeline.py "${EXTRA_ARGS[@]}"
 
       - name: Upload Gold artifacts
-        if: success()
+        if: ${{ always() && !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: canadapt-gold-${{ github.run_id }}
@@ -81,4 +81,6 @@ jobs:
             data/gold/canadapt_analytics.duckdb
             data/gold/parquet/
             data/metadata/runs/
+            data/metadata/steps/
           retention-days: 14
+          if-no-files-found: ignore

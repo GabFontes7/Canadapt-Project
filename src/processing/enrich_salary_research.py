@@ -21,9 +21,14 @@ from urllib.parse import urlparse
 import duckdb
 from google import genai
 from google.genai import types
-from google.genai.errors import ClientError as GeminiClientError
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from pipeline_policy import (
+    SALARY_RESEARCH_PROMPT_VERSION as PROMPT_VERSION,
+    allow_gemini_degraded,
+    gemini_exception_types,
+    write_step_metrics,
+)
 from process_silver import (
     GEMINI_MODEL_FALLBACK_QUEUE,
     load_env,
@@ -34,8 +39,8 @@ from process_silver import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SILVER_ROOT = PROJECT_ROOT / "data" / "silver"
 CACHE_PATH = SILVER_ROOT / "metadata" / "salary_research_cache.json"
-PROMPT_VERSION = "salary_research_v2"
 DEFAULT_MAX_JOBS = 25
+GEMINI_CATCH = gemini_exception_types()
 MIN_ANNUAL = 20_000.0
 MAX_ANNUAL = 500_000.0
 HTTPS_URL_RE = re.compile(r"https://[^\s\]\)\"'<>]+", re.IGNORECASE)
@@ -415,7 +420,7 @@ def _gemini_research_text(
                 len(from_text),
             )
             return text, merged, model_id
-        except (GeminiClientError, RuntimeError, ValueError) as exc:
+        except GEMINI_CATCH as exc:
             errors.append(f"{model_id}: {exc}")
             logger.warning("Salary research text failed | model=%s | %s", model_id, exc)
             time.sleep(1.5)
@@ -442,12 +447,7 @@ def _gemini_structure(prompt: str) -> tuple[SalaryResearchPayload, str]:
             if not raw:
                 raise RuntimeError("empty structured response")
             return SalaryResearchPayload.model_validate_json(raw), model_id
-        except (
-            GeminiClientError,
-            ValidationError,
-            RuntimeError,
-            ValueError,
-        ) as exc:
+        except GEMINI_CATCH + (ValidationError, ValueError) as exc:
             errors.append(f"{model_id}: {exc}")
             logger.warning(
                 "Salary structure failed | model=%s | %s", model_id, exc
@@ -722,14 +722,18 @@ def main() -> int:
             model_used = "cache-only"
             new_count = 0
             found_count = 0
+            salary_degraded = False
             # Small batches keep grounding prompts focused.
             batch_size = 3
             for start in range(0, len(todo), batch_size):
                 batch = todo[start : start + batch_size]
                 try:
                     mapped, model_used = _research_batch(batch)
-                except RuntimeError as exc:
-                    logger.error("Salary research batch failed | %s", exc)
+                except GEMINI_CATCH as exc:
+                    if not allow_gemini_degraded():
+                        raise
+                    salary_degraded = True
+                    logger.warning("Salary research batch skipped | %s", exc)
                     continue
                 cache.update(mapped)
                 new_count += len(mapped)
@@ -759,6 +763,8 @@ def main() -> int:
                 )
             _save_cache(cache)
             rows = _rewrite_jobs(con, jobs_path, cache)
+            if todo and new_count == 0:
+                salary_degraded = True
 
         year, month, day = _partition_tuple(jobs_path)
         jobs_key = (
@@ -771,13 +777,27 @@ def main() -> int:
         )
         logger.info(
             "Salary research complete | rows=%d | researched=%d | found=%d | "
-            "model=%s | jobs_s3=%s | cache_s3=%s",
+            "model=%s | degraded=%s | jobs_s3=%s | cache_s3=%s",
             rows,
             new_count,
             found_count,
             model_used,
+            salary_degraded,
             jobs_s3,
             cache_s3,
+        )
+        write_step_metrics(
+            "enrich_salary_research",
+            {
+                "status": "degraded" if salary_degraded else "success",
+                "degraded": salary_degraded,
+                "rows": rows,
+                "gemini_calls": new_count,
+                "found": found_count,
+                "queued": len(todo),
+                "model": model_used,
+                "salary_research_prompt_version": PROMPT_VERSION,
+            },
         )
         return 0
     except (duckdb.Error, OSError, RuntimeError, ValueError, EnvironmentError) as exc:

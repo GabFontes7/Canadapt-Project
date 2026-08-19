@@ -24,6 +24,14 @@ wages_nacional as (
 joined as (
     select
         f.vaga_id,
+        f.fonte_vaga,
+        f.id_vaga_na_fonte,
+        f.site_origem,
+        f.area_foco_coleta,
+        f.sinais_mobilidade,
+        f.versao_filtro_coleta,
+        f.tipo_contrato,
+        f.salario_texto_original,
         f.titulo_cargo,
         f.descricao_vaga,
         f.empresa,
@@ -154,7 +162,14 @@ classificado as (
         case
             when regexp_matches(lower(titulo_cargo), 'nurse|(^|[^a-z])rn([^a-z]|$)|medical|health|patient|mri|medicine')
                 then 'saude'
-            when regexp_matches(lower(titulo_cargo), 'engineer|developer|software|data|analytics|analyst|technolog|java|\\.net|azure|devops|machine learning|ai ')
+            when area_foco_coleta = 'banking_operations'
+              or regexp_matches(
+                    lower(titulo_cargo),
+                    'bank|back[ -]?office|middle[ -]?office|trade support|settlement|reconciliation|treasury|aml|kyc|financial crime|compliance|regulatory|credit operations|payment operations'
+                 )
+                then 'financas_bancario'
+            when area_foco_coleta = 'technology'
+              or regexp_matches(lower(titulo_cargo), 'engineer|developer|software|data|analytics|technolog|java|\\.net|azure|devops|machine learning|ai ')
                 then 'tecnologia_engenharia'
             when regexp_matches(lower(titulo_cargo), 'sales|marketing|canvass|business development')
                 then 'vendas_marketing'
@@ -607,6 +622,14 @@ qualidade as (
 
 select
     vaga_id,
+    fonte_vaga,
+    id_vaga_na_fonte,
+    site_origem,
+    area_foco_coleta,
+    sinais_mobilidade,
+    versao_filtro_coleta,
+    tipo_contrato,
+    salario_texto_original,
     titulo_cargo,
     descricao_vaga,
     empresa,

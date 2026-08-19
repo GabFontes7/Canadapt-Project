@@ -2,7 +2,7 @@
 CanAdapt — orquestrador local / CI do pipeline Medalhão.
 
 Ordem:
-  1) ingestão Adzuna (Bronze)
+  1) ingestão Adzuna e Jooble (Bronze)
   2) ingestão custo de vida (Bronze)
   3) ingestão de salários oficiais (Bronze)
   4) processamento Silver (vagas, custos e salários)
@@ -29,6 +29,12 @@ from pathlib import Path
 import duckdb
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROCESSING_DIR = PROJECT_ROOT / "src" / "processing"
+if str(PROCESSING_DIR) not in sys.path:
+    sys.path.insert(0, str(PROCESSING_DIR))
+
+from pipeline_policy import DATA_CONTRACT_VERSION, load_step_metrics  # noqa: E402
+
 RUN_EVENTS: list[dict] = []
 
 
@@ -128,25 +134,35 @@ def _collect_quality_metrics() -> tuple[dict, list[str]]:
     return metrics, alerts
 
 
-def _write_run_manifest(status: str) -> Path:
+def _blocking_quality_failures(metrics: dict) -> list[str]:
+    if not metrics:
+        return ["Gold metrics unavailable after dbt"]
+    if int(metrics.get("vagas_atuais") or 0) == 0:
+        return ["Gold has zero current jobs"]
+    return []
+
+
+def _write_run_manifest(status: str, extra: dict | None = None) -> Path:
     run_id = os.environ.get("CANADAPT_RUN_ID", "unknown")
     out_dir = PROJECT_ROOT / "data" / "metadata" / "runs"
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{run_id}.json"
     metrics, alerts = _collect_quality_metrics()
+    payload = {
+        "run_id": run_id,
+        "status": status,
+        "data_contract_version": DATA_CONTRACT_VERSION,
+        "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+        "steps": RUN_EVENTS,
+        "step_metrics": load_step_metrics(run_id),
+        "quality_metrics": metrics,
+        "alerts": alerts,
+        "quality_gate_failures": _blocking_quality_failures(metrics),
+    }
+    if extra:
+        payload.update(extra)
     path.write_text(
-        json.dumps(
-            {
-                "run_id": run_id,
-                "status": status,
-                "finished_at_utc": datetime.now(timezone.utc).isoformat(),
-                "steps": RUN_EVENTS,
-                "quality_metrics": metrics,
-                "alerts": alerts,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
+        json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     return path
@@ -155,6 +171,7 @@ def _write_run_manifest(status: str) -> Path:
 def main() -> int:
     parser = argparse.ArgumentParser(description="CanAdapt weekly/local pipeline runner")
     parser.add_argument("--skip-adzuna", action="store_true", help="Pula ingestão Adzuna")
+    parser.add_argument("--skip-jooble", action="store_true", help="Pula ingestão Jooble")
     parser.add_argument("--skip-col", action="store_true", help="Pula ingestão de custo de vida")
     parser.add_argument("--skip-wages", action="store_true", help="Pula salários oficiais")
     parser.add_argument("--skip-silver", action="store_true", help="Pula processamento Silver")
@@ -186,6 +203,11 @@ def main() -> int:
         skip=args.skip_adzuna,
     )
     _run(
+        "Ingestao Jooble -> Bronze",
+        [python, "src/ingestion/ingest_jooble.py"],
+        skip=args.skip_jooble,
+    )
+    _run(
         "Ingestao custo de vida -> Bronze",
         [python, "src/ingestion/ingest_cost_of_living.py"],
         skip=args.skip_col,
@@ -198,7 +220,12 @@ def main() -> int:
     _run(
         "Contratos Bronze",
         [python, "src/quality/validate_bronze.py"],
-        skip=args.skip_adzuna and args.skip_col and args.skip_wages,
+        skip=(
+            args.skip_adzuna
+            and args.skip_jooble
+            and args.skip_col
+            and args.skip_wages
+        ),
     )
     _run(
         "Processamento Silver",
@@ -248,8 +275,25 @@ def main() -> int:
         skip=args.skip_validate,
     )
 
-    manifest = _write_run_manifest("success")
-    print(f"\nPipeline CanAdapt finalizado com sucesso. Manifest: {manifest}")
+    run_id = os.environ["CANADAPT_RUN_ID"]
+    step_metrics = load_step_metrics(run_id)
+    degraded_steps = [row["step"] for row in step_metrics if row.get("degraded")]
+    metrics, _alerts = _collect_quality_metrics()
+    blocking = [] if args.skip_dbt else _blocking_quality_failures(metrics)
+    if blocking:
+        manifest = _write_run_manifest(
+            "failed",
+            {"degraded_steps": degraded_steps, "quality_gate_failures": blocking},
+        )
+        print(f"\nQuality gate failed: {'; '.join(blocking)}", file=sys.stderr)
+        print(f"Manifest: {manifest}", file=sys.stderr)
+        return 1
+
+    status = "degraded" if degraded_steps else "success"
+    manifest = _write_run_manifest(status, {"degraded_steps": degraded_steps})
+    print(f"\nPipeline CanAdapt finalizado com status={status}. Manifest: {manifest}")
+    if degraded_steps:
+        print("Etapas degradadas (Gemini): " + ", ".join(degraded_steps))
     return 0
 
 

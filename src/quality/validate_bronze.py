@@ -55,6 +55,49 @@ def _validate_adzuna(path: Path) -> dict[str, Any]:
     }
 
 
+def _validate_jooble(path: Path) -> dict[str, Any]:
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    errors: list[str] = []
+    for field in ("source", "country", "extracted_at_utc", "filter_contract", "payload"):
+        if field not in doc:
+            errors.append(f"missing envelope field: {field}")
+
+    results = (doc.get("payload") or {}).get("results")
+    if not isinstance(results, list):
+        errors.append("payload.results must be a list")
+        results = []
+
+    required = ("id", "title", "link", "canadapt_area", "canadapt_mobility_signals")
+    invalid = [
+        index
+        for index, job in enumerate(results)
+        if any(not job.get(field) for field in required)
+    ]
+    invalid_area = [
+        index
+        for index, job in enumerate(results)
+        if job.get("canadapt_area") not in {"technology", "banking_operations"}
+    ]
+    ids = [str(job.get("id")) for job in results if job.get("id")]
+    duplicate_ids = len(ids) - len(set(ids))
+    if invalid:
+        errors.append(f"{len(invalid)} Jooble jobs missing required fields")
+    if invalid_area:
+        errors.append(f"{len(invalid_area)} Jooble jobs outside allowed areas")
+    if duplicate_ids:
+        errors.append(f"{duplicate_ids} duplicate Jooble job IDs")
+
+    return {
+        "file": str(path),
+        "rows": len(results),
+        "invalid_rows": len(invalid),
+        "invalid_area_rows": len(invalid_area),
+        "duplicate_ids": duplicate_ids,
+        "requests_used": int(doc.get("requests_used") or 0),
+        "errors": errors,
+    }
+
+
 def _validate_cost_of_living(path: Path) -> dict[str, Any]:
     doc = json.loads(path.read_text(encoding="utf-8"))
     provinces = doc.get("provincias") or []
@@ -135,11 +178,16 @@ def main() -> int:
     }
     try:
         report["sources"]["adzuna"] = _validate_adzuna(_latest("adzuna_raw_*.json"))
+        jooble_files = list(BRONZE_ROOT.rglob("jooble_raw_*.json"))
+        if jooble_files:
+            report["sources"]["jooble"] = _validate_jooble(
+                max(jooble_files, key=lambda path: path.stat().st_mtime)
+            )
         report["sources"]["cost_of_living"] = _validate_cost_of_living(
             _latest("cost_of_living.json")
         )
         report["sources"]["wages"] = _validate_wages(_latest("wages_official.csv"))
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, json.JSONDecodeError, FileNotFoundError) as exc:
         report["fatal_error"] = str(exc)
 
     errors = [

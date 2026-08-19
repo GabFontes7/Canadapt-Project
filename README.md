@@ -6,7 +6,7 @@ custos regionais e uma estimativa transparente de viabilidade financeira.
 ## Arquitetura
 
 ```text
-Adzuna + ESDC + CMHC + StatCan + CRA/Revenu Québec
+Adzuna + Jooble + ESDC + CMHC + StatCan + CRA/Revenu Québec
         |
         v
 Bronze JSON/CSV (local + S3, imutável)
@@ -22,8 +22,21 @@ dbt + DuckDB
 ```
 
 O pipeline coleta os últimos sete dias semanalmente e **acrescenta** a nova
-partição ao histórico. O modelo `fct_vagas_snapshot` mantém as observações por
-data; `dim_vaga` mantém as versões SCD2 (`valid_from`, `valid_to`, `is_current`).
+partição ao histórico. O Silver **não** relê todo o Bronze: usa o snapshot
+Adzuna/Jooble do dia mais recente e grava `silver/jobs/year=/month=/day=/`.
+O modelo `fct_vagas_snapshot` mantém as observações por data; `dim_vaga`
+fecha vagas que sumiram do snapshot atual (`valid_from`, `valid_to`,
+`is_current`). Apagar partições Silver antigas **remove** esse histórico na
+próxima rebuild do Gold — por isso a retenção padrão é 90 dias, não zero.
+
+Cada partição Silver nova carrega `data_contract_version` e versões de
+prompt (`geo_prompt_version`, `noc_prompt_version`,
+`salary_research_prompt_version`). O manifesto em `data/metadata/runs/`
+inclui métricas de qualidade, etapas degradadas e o resultado do quality
+gate (Gold com zero vagas atuais falha o job).
+
+Se o Gemini responder 503, as etapas de geo/NOC/salário usam cache e
+seguem para o Gold com status `degraded` (não derrubam o CI).
 
 A ingestão Adzuna roda três consultas complementares, todas exigindo sinal de
 mobilidade (LMIA, patrocínio, relocação ou visto): uma multissetorial, uma na
@@ -31,6 +44,15 @@ categoria `it-jobs` ordenada por data e uma na mesma categoria ordenada por
 relevância para "data". Os anúncios são deduplicados por `id` e o volume de cada
 execução é limitado por `CANADAPT_MAX_JOBS_PER_RUN` (padrão 500) para conter o
 custo de enriquecimento.
+
+A ingestão Jooble é deliberadamente mais restrita: retém somente vagas de
+**tecnologia** ou de **operações bancárias e financeiras** (incluindo back
+office, middle office, risco, compliance, AML/KYC, tesouraria e áreas
+correlatas) que também apresentem sinal explícito de mobilidade, como visa
+sponsorship, LMIA/EIMT, apoio a work permit ou relocation internacional.
+O filtro é aplicado novamente após a resposta da API para impedir que resultados
+fora do escopo cheguem à Silver. São oito consultas por execução semanal; uma
+cota inicial de 500 chamadas cobre aproximadamente 62 execuções.
 
 ## Execução local
 
@@ -54,12 +76,21 @@ grava um manifesto em `data/metadata/runs/`.
 ## Automação
 
 `.github/workflows/weekly_pipeline.yml` roda toda segunda-feira às 12:00 UTC e
-também permite execução manual. Antes da carga, o runner restaura o histórico
-Silver e os caches do S3.
+também permite execução manual. Antes da carga, o runner restaura caches,
+wages e as partições hive dos últimos `CANADAPT_LAKE_RETENTION_DAYS` dias
+(`scripts/restore_lake_slice.py`). Não baixa o Silver inteiro.
+
+Lifecycle S3 (expira Bronze de vagas/Jooble/CoL e Silver de jobs/CoL após
+90 dias; mantém wages, `silver/metadata` e Gold):
+
+```bash
+aws s3api put-bucket-lifecycle-configuration --bucket canadapt-data-lake-gf --lifecycle-configuration file://infra/s3_lifecycle.json
+```
 
 Configure no GitHub Actions:
 
 - `ADZUNA_APP_ID`, `ADZUNA_APP_KEY`
+- `JOOBLE_API_KEY`
 - `GEMINI_API_KEY`
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
 - `AWS_DEFAULT_REGION`
@@ -105,15 +136,15 @@ Streamlit Community Cloud → lê Gold latest do S3
 AWS_ACCESS_KEY_ID = "..."
 AWS_SECRET_ACCESS_KEY = "..."
 AWS_DEFAULT_REGION = "us-east-1"
-AWS_BUCKET_NAME = "canadapt-data-lake"
-AWS_S3_BUCKET_NAME = "canadapt-data-lake"
+AWS_BUCKET_NAME = "canadapt-data-lake-gf"
+AWS_S3_BUCKET_NAME = "canadapt-data-lake-gf"
 ```
 
 5. Deploy. A URL fica no formato `https://<nome>.streamlit.app`.
 
 A app **não** precisa de Adzuna nem Gemini — só leitura do S3. Idealmente a
 chave AWS usada no Streamlit tem permissão apenas de leitura em
-`s3://canadapt-data-lake/gold/`.
+`s3://canadapt-data-lake-gf/gold/`.
 
 Após ~12h sem visitas a app hiberna; no próximo acesso ela acorda sozinha
 (pode levar alguns segundos).

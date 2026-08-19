@@ -1,9 +1,9 @@
 """
 CanAdapt — Silver processing (geo standardization + Dual-Write Parquet).
 
-Reads Bronze Adzuna jobs + cost-of-living, standardizes locations via Gemini
-with Cache-Aside + model-cost fallback, and writes clean Parquet tables to
-local Silver and AWS S3.
+Reads Bronze Adzuna + Jooble jobs and cost-of-living, standardizes locations
+via Gemini with Cache-Aside + model-cost fallback, deduplicates sources, and
+writes clean Parquet tables to local Silver and AWS S3.
 """
 
 from __future__ import annotations
@@ -11,7 +11,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TypeVar
@@ -24,6 +26,15 @@ from google import genai
 from google.genai import types
 from google.genai.errors import ClientError as GeminiClientError
 from pydantic import BaseModel, Field, ValidationError
+
+from pipeline_policy import (
+    DATA_CONTRACT_VERSION,
+    GEO_PROMPT_VERSION,
+    UNMAPPED_GEO,
+    allow_gemini_degraded,
+    contract_stamp,
+    write_step_metrics,
+)
 
 # -----------------------------------------------------------------------------
 # Config
@@ -201,6 +212,21 @@ def resolve_latest_adzuna_file() -> Path:
             f"No Adzuna bronze files found under {BRONZE_ROOT}"
         )
     return files[0]
+
+
+def resolve_jooble_file_for_partition(
+    year_p: str,
+    month_p: str,
+    day_p: str,
+) -> Path | None:
+    """Return the latest Jooble Bronze file for the Adzuna snapshot day."""
+    directory = BRONZE_ROOT / "jooble" / year_p / month_p / day_p
+    files = sorted(
+        directory.glob("jooble_raw_*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return files[0] if files else None
 
 
 def resolve_cost_of_living_file(preferred_day_dir: Path) -> Path:
@@ -392,6 +418,7 @@ def gemini_map_locations(terms: list[str]) -> tuple[dict[str, dict[str, Any]], s
 
     mappings: dict[str, dict[str, Any]] = {}
     model_used = ""
+    degraded = False
 
     for i in range(0, len(terms), GEO_BATCH_SIZE):
         batch = terms[i : i + GEO_BATCH_SIZE]
@@ -401,11 +428,24 @@ def gemini_map_locations(terms: list[str]) -> tuple[dict[str, dict[str, Any]], s
             "TERMOS:\n"
             + "\n".join(f"- {t}" for t in batch)
         )
-        payload, model_used = call_gemini_with_fallback(
-            prompt,
-            GeoMappingPayload,
-            system_instruction=GEO_SYSTEM_INSTRUCTION,
-        )
+        try:
+            payload, model_used = call_gemini_with_fallback(
+                prompt,
+                GeoMappingPayload,
+                system_instruction=GEO_SYSTEM_INSTRUCTION,
+            )
+        except RuntimeError as exc:
+            if not allow_gemini_degraded():
+                raise
+            degraded = True
+            logger.warning(
+                "Geo Gemini unavailable; mapping batch to Remote | start=%d | %s",
+                i,
+                exc,
+            )
+            for term in batch:
+                mappings[term] = dict(UNMAPPED_GEO)
+            continue
         for item in payload.mapeamentos:
             mappings[item.termo_original] = normalize_geo_mapping(item)
 
@@ -421,6 +461,8 @@ def gemini_map_locations(terms: list[str]) -> tuple[dict[str, dict[str, Any]], s
                     "confianca": 0.0,
                 }
 
+    if degraded:
+        model_used = model_used or "degraded-cache-only"
     return mappings, model_used
 
 
@@ -468,6 +510,177 @@ def extract_distinct_locations_duckdb(con: duckdb.DuckDBPyConnection, adzuna_pat
             raise RuntimeError(
                 f"Failed to extract locations from {adzuna_path}: {py_exc}"
             ) from py_exc
+
+
+def _clean_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _as_bool(value: Any) -> bool:
+    return str(value or "").strip().casefold() in {"1", "true", "yes"}
+
+
+def _dedupe_fingerprint(row: dict[str, Any]) -> str:
+    """Cross-source fingerprint for the same employer/title/location."""
+    canonical = "|".join(
+        _clean_text(row.get(field)).casefold()
+        for field in ("title", "company", "location_raw")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def normalize_adzuna_rows(path: Path, run_id: str) -> list[dict[str, Any]]:
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    extracted_at = doc.get("extracted_at_utc")
+    rows: list[dict[str, Any]] = []
+    for job in (doc.get("payload") or {}).get("results") or []:
+        source_id = _clean_text(job.get("id"))
+        if not source_id:
+            continue
+        rows.append(
+            {
+                "job_id": source_id,
+                "source": "adzuna",
+                "source_job_id": source_id,
+                "source_site": "Adzuna",
+                "title": job.get("title"),
+                "company": (job.get("company") or {}).get("display_name"),
+                "location_raw": (job.get("location") or {}).get("display_name"),
+                "category": (job.get("category") or {}).get("label"),
+                "focus_area": None,
+                "mobility_signals": [],
+                "filter_version": "adzuna_mobility_queries_v1",
+                "job_type": None,
+                "description": job.get("description"),
+                "created": job.get("created"),
+                "redirect_url": job.get("redirect_url"),
+                "salary_raw": None,
+                "salary_min": job.get("salary_min"),
+                "salary_max": job.get("salary_max"),
+                "salary_is_predicted": _as_bool(job.get("salary_is_predicted")),
+                "extracted_at_utc": extracted_at,
+                "pipeline_run_id": run_id,
+            }
+        )
+    return rows
+
+
+def normalize_jooble_rows(path: Path | None, run_id: str) -> list[dict[str, Any]]:
+    if path is None:
+        return []
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    extracted_at = doc.get("extracted_at_utc")
+    rows: list[dict[str, Any]] = []
+    for job in (doc.get("payload") or {}).get("results") or []:
+        source_id = _clean_text(job.get("id"))
+        if not source_id:
+            continue
+        rows.append(
+            {
+                "job_id": f"jooble:{source_id}",
+                "source": "jooble",
+                "source_job_id": source_id,
+                "source_site": job.get("source") or "Jooble",
+                "title": job.get("title"),
+                "company": job.get("company"),
+                "location_raw": job.get("location"),
+                "category": job.get("canadapt_area"),
+                "focus_area": job.get("canadapt_area"),
+                "mobility_signals": job.get("canadapt_mobility_signals") or [],
+                "filter_version": job.get("canadapt_filter_version"),
+                "job_type": job.get("type"),
+                "description": job.get("snippet"),
+                "created": job.get("updated"),
+                "redirect_url": job.get("link"),
+                # Jooble exposes salary as free text without a reliable period.
+                # Preserve it for audit, but do not annualize ambiguous values.
+                "salary_raw": job.get("salary"),
+                "salary_min": None,
+                "salary_max": None,
+                "salary_is_predicted": False,
+                "extracted_at_utc": extracted_at,
+                "pipeline_run_id": run_id,
+            }
+        )
+    return rows
+
+
+def merge_and_dedupe_job_rows(
+    adzuna_rows: list[dict[str, Any]],
+    jooble_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Prefer the richer row when two sources expose the same listing."""
+    selected: dict[str, dict[str, Any]] = {}
+    source_priority = {"adzuna": 2, "jooble": 1}
+    for row in adzuna_rows + jooble_rows:
+        fingerprint = _dedupe_fingerprint(row)
+        row["dedupe_fingerprint"] = fingerprint
+        current = selected.get(fingerprint)
+        if current is None:
+            selected[fingerprint] = row
+            continue
+        candidate_score = (
+            source_priority.get(str(row.get("source")), 0),
+            len(_clean_text(row.get("description"))),
+            bool(row.get("salary_min")),
+        )
+        current_score = (
+            source_priority.get(str(current.get("source")), 0),
+            len(_clean_text(current.get("description"))),
+            bool(current.get("salary_min")),
+        )
+        if candidate_score > current_score:
+            selected[fingerprint] = row
+    return list(selected.values())
+
+
+def build_multisource_jobs_clean_parquet(
+    con: duckdb.DuckDBPyConnection,
+    rows: list[dict[str, Any]],
+    geo_cache: dict[str, dict[str, Any]],
+    out_path: Path,
+) -> int:
+    """Attach standardized geography and write the canonical Silver schema."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    enriched: list[dict[str, Any]] = []
+    for row in rows:
+        location = _clean_text(row.get("location_raw"))
+        geo = geo_cache.get(
+            location,
+            {
+                "cidade": "Remote",
+                "provincia": "Remote",
+                "cma": "Remote",
+                "metodo": "fallback_unmapped",
+                "confianca": 0.0,
+            },
+        )
+        enriched.append(
+            {
+                **row,
+                "cidade_padronizada": geo.get("cidade", "Remote"),
+                "provincia_padronizada": geo.get("provincia", "Remote"),
+                "cma_padronizada": geo.get("cma", geo.get("cidade", "Remote")),
+                "geo_mapping_method": geo.get("metodo", "fallback_unmapped"),
+                "geo_confidence": geo.get("confianca", 0.0),
+                **contract_stamp(),
+            }
+        )
+    if not enriched:
+        raise RuntimeError("No valid Adzuna or Jooble jobs available for Silver.")
+
+    tmp = out_path.parent / "_multisource_jobs_tmp.json"
+    try:
+        tmp.write_text(json.dumps(enriched, ensure_ascii=False), encoding="utf-8")
+        tmp_sql = tmp.as_posix().replace("'", "''")
+        out_sql = out_path.as_posix().replace("'", "''")
+        con.execute(
+            f"COPY (SELECT * FROM read_json_auto('{tmp_sql}')) TO '{out_sql}' "
+            "(FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
+    finally:
+        tmp.unlink(missing_ok=True)
+    return len(enriched)
 
 
 def build_jobs_clean_parquet(
@@ -531,7 +744,7 @@ def build_jobs_clean_parquet(
                   TRY_CAST(j.salary_max AS DOUBLE) AS salary_max,
                   TRY_CAST(j.salary_is_predicted AS INTEGER) AS salary_is_predicted,
                   extracted_at_utc,
-                  '{run_id_sql}' AS pipeline_run_id
+                  CAST('{run_id_sql}' AS VARCHAR) AS pipeline_run_id
                 FROM jobs
               ),
               geo_map AS (
@@ -690,9 +903,11 @@ def main() -> int:
     try:
         adzuna_path = resolve_latest_adzuna_file()
         year_p, month_p, day_p = partition_segments_from_bronze_path(adzuna_path)
+        jooble_path = resolve_jooble_file_for_partition(year_p, month_p, day_p)
         col_path = resolve_cost_of_living_file(adzuna_path.parent)
 
         logger.info("Bronze Adzuna: %s", adzuna_path)
+        logger.info("Bronze Jooble: %s", jooble_path or "(not available)")
         logger.info("Bronze CoL: %s", col_path)
         logger.info("Silver partition: %s/%s/%s", year_p, month_p, day_p)
 
@@ -700,7 +915,17 @@ def main() -> int:
 
         # --- Cache-Aside geo resolution ---
         geo_cache = load_geo_cache()
-        distinct_terms = extract_distinct_locations_duckdb(con, adzuna_path)
+        run_id = os.getenv("CANADAPT_RUN_ID", "").strip() or "local-manual"
+        adzuna_rows = normalize_adzuna_rows(adzuna_path, run_id)
+        jooble_rows = normalize_jooble_rows(jooble_path, run_id)
+        job_rows = merge_and_dedupe_job_rows(adzuna_rows, jooble_rows)
+        distinct_terms = sorted(
+            {
+                _clean_text(row.get("location_raw"))
+                for row in job_rows
+                if _clean_text(row.get("location_raw"))
+            }
+        )
         total_unique = len(distinct_terms)
 
         required_geo_fields = {"cidade", "provincia", "cma", "metodo", "confianca"}
@@ -724,14 +949,26 @@ def main() -> int:
             save_geo_cache(geo_cache)
         else:
             logger.info("Geo cache full hit | API cost $0.00 for geography")
+        geo_degraded = any(
+            (geo_cache.get(term) or {}).get("metodo") == "gemini_unavailable"
+            for term in missing
+        )
 
         # --- Silver jobs ---
         jobs_local = (
             SILVER_ROOT / "jobs" / year_p / month_p / day_p / "jobs_clean.parquet"
         )
         jobs_s3_key = f"silver/jobs/{year_p}/{month_p}/{day_p}/jobs_clean.parquet"
-        jobs_n = build_jobs_clean_parquet(con, adzuna_path, geo_cache, jobs_local)
+        jobs_n = build_multisource_jobs_clean_parquet(
+            con, job_rows, geo_cache, jobs_local
+        )
         logger.info("Silver jobs local written | rows=%d | %s", jobs_n, jobs_local)
+        logger.info(
+            "Silver source mix | adzuna=%d | jooble=%d | after_dedupe=%d",
+            len(adzuna_rows),
+            len(jooble_rows),
+            len(job_rows),
+        )
         jobs_s3 = upload_file_to_s3(jobs_local, jobs_s3_key)
 
         # --- Silver cost of living ---
@@ -772,7 +1009,21 @@ def main() -> int:
         print(f"CoL S3:                           {col_s3}")
         print(f"Geo cache:                        {GEO_CACHE_PATH}")
         print(f"Geo cache S3:                     {geo_cache_s3}")
+        print(f"Contrato de dados:                {DATA_CONTRACT_VERSION}")
+        print(f"Prompt geo:                       {GEO_PROMPT_VERSION}")
         print("================================================\n")
+        write_step_metrics(
+            "process_silver",
+            {
+                "status": "degraded" if geo_degraded else "success",
+                "degraded": geo_degraded,
+                "rows": jobs_n,
+                "cache_hits": cache_hits,
+                "gemini_calls": len(missing),
+                "model": model_used or "cache-only",
+                "geo_prompt_version": GEO_PROMPT_VERSION,
+            },
+        )
         return 0
 
     except (EnvironmentError, FileNotFoundError, RuntimeError, OSError) as exc:

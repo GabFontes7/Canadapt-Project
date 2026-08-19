@@ -12,6 +12,7 @@ with snapshots as (
 normalizado as (
     select
         vaga_id,
+        fonte_vaga,
         data_snapshot,
         salario_bruto_anual,
         salario_bruto_anual_maximo,
@@ -34,6 +35,7 @@ select
     {{ dbt_utils.generate_surrogate_key(['n.vaga_id', 'n.data_snapshot']) }} as sk_snapshot,
     d.sk_vaga,
     n.vaga_id,
+    n.fonte_vaga,
     {{ dbt_utils.generate_surrogate_key(['n.cidade_chave', 'n.provincia_chave']) }} as sk_geografia,
     n.data_snapshot,
     n.salario_bruto_anual,
