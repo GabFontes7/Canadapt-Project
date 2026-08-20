@@ -3,23 +3,22 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 
 import boto3
+from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
 import duckdb
 import pandas as pd
 import streamlit as st
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT / "src" / "ingestion") not in sys.path:
-    sys.path.insert(0, str(ROOT / "src" / "ingestion"))
-from mobility_filter import (
+from views.mobility_display import (
     mobility_confirmed,
     mobility_signal_labels,
     parse_mobility_signals,
 )
 
+ROOT = Path(__file__).resolve().parents[1]
 GOLD_ROOT = ROOT / "data" / "gold" / "parquet"
 FCT_PATH = GOLD_ROOT / "fct_viabilidade_vagas" / "latest" / "fct_viabilidade_vagas.parquet"
 REMOTE_PATH = (
@@ -99,14 +98,25 @@ def _download_gold_if_needed(path: Path, table: str) -> None:
             f"{path} não existe e AWS_BUCKET_NAME/AWS_S3_BUCKET_NAME não foi configurado."
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    boto3.client(
+    client = boto3.client(
         "s3",
         region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
-    ).download_file(
-        bucket,
-        f"gold/{table}/latest/{table}.parquet",
-        str(path),
+        config=Config(
+            connect_timeout=10,
+            read_timeout=60,
+            retries={"max_attempts": 3, "mode": "standard"},
+        ),
     )
+    try:
+        client.download_file(
+            bucket,
+            f"gold/{table}/latest/{table}.parquet",
+            str(path),
+        )
+    except (ClientError, BotoCoreError, OSError) as exc:
+        raise FileNotFoundError(
+            f"Falha ao baixar gold/{table}/latest/{table}.parquet de s3://{bucket}: {exc}"
+        ) from exc
 
 
 @st.cache_data(ttl=900)
@@ -462,7 +472,8 @@ def render() -> None:
     def aplicar_filtros_comuns(df: pd.DataFrame, *, coluna_ranking: str) -> pd.DataFrame:
         out = df.copy()
         if somente_mobilidade and "sinais_mobilidade" in out.columns:
-            out = out[out.apply(mobilidade_confirmada, axis=1)]
+            mask = out["sinais_mobilidade"].map(mobility_confirmed)
+            out = out[mask]
         if ranking_seguro and coluna_ranking in out.columns:
             out = out[out[coluna_ranking] == True]  # noqa: E712
         elif not incluir_estimativas:
