@@ -24,7 +24,7 @@ def _latest(pattern: str) -> Path:
 def _validate_adzuna(path: Path) -> dict[str, Any]:
     doc = json.loads(path.read_text(encoding="utf-8"))
     errors: list[str] = []
-    for field in ("source", "country", "extracted_at_utc", "payload"):
+    for field in ("source", "country", "extracted_at_utc", "filter_contract", "payload"):
         if field not in doc:
             errors.append(f"missing envelope field: {field}")
 
@@ -33,16 +33,23 @@ def _validate_adzuna(path: Path) -> dict[str, Any]:
         errors.append("payload.results must be a non-empty list")
         results = []
 
-    required = ("id", "title", "redirect_url")
+    required = ("id", "title", "redirect_url", "canadapt_mobility_signals")
     invalid = [
         index
         for index, job in enumerate(results)
         if any(not job.get(field) for field in required)
     ]
+    empty_mobility = [
+        index
+        for index, job in enumerate(results)
+        if not job.get("canadapt_mobility_signals")
+    ]
     ids = [str(job.get("id")) for job in results if job.get("id")]
     duplicate_ids = len(ids) - len(set(ids))
     if invalid:
-        errors.append(f"{len(invalid)} jobs missing id/title/redirect_url")
+        errors.append(f"{len(invalid)} jobs missing id/title/redirect_url/mobility")
+    if empty_mobility:
+        errors.append(f"{len(empty_mobility)} Adzuna jobs without mobility signals")
     if duplicate_ids:
         errors.append(f"{duplicate_ids} duplicate job IDs")
 
@@ -94,6 +101,47 @@ def _validate_jooble(path: Path) -> dict[str, Any]:
         "invalid_area_rows": len(invalid_area),
         "duplicate_ids": duplicate_ids,
         "requests_used": int(doc.get("requests_used") or 0),
+        "errors": errors,
+    }
+
+
+def _validate_jobbank(path: Path) -> dict[str, Any]:
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    errors: list[str] = []
+    for field in ("source", "country", "extracted_at_utc", "filter_contract", "payload"):
+        if field not in doc:
+            errors.append(f"missing envelope field: {field}")
+
+    results = (doc.get("payload") or {}).get("results")
+    if not isinstance(results, list) or not results:
+        errors.append("payload.results must be a non-empty list")
+        results = []
+
+    required = ("id", "title", "url", "canadapt_mobility_signals")
+    invalid = [
+        index
+        for index, job in enumerate(results)
+        if any(not job.get(field) for field in required)
+    ]
+    empty_mobility = [
+        index
+        for index, job in enumerate(results)
+        if not job.get("canadapt_mobility_signals")
+    ]
+    ids = [str(job.get("id")) for job in results if job.get("id")]
+    duplicate_ids = len(ids) - len(set(ids))
+    if invalid:
+        errors.append(f"{len(invalid)} Job Bank jobs missing required fields")
+    if empty_mobility:
+        errors.append(f"{len(empty_mobility)} Job Bank jobs without mobility signals")
+    if duplicate_ids:
+        errors.append(f"{duplicate_ids} duplicate Job Bank IDs")
+
+    return {
+        "file": str(path),
+        "rows": len(results),
+        "invalid_rows": len(invalid),
+        "duplicate_ids": duplicate_ids,
         "errors": errors,
     }
 
@@ -182,6 +230,11 @@ def main() -> int:
         if jooble_files:
             report["sources"]["jooble"] = _validate_jooble(
                 max(jooble_files, key=lambda path: path.stat().st_mtime)
+            )
+        jobbank_files = list(BRONZE_ROOT.rglob("jobbank_raw_*.json"))
+        if jobbank_files:
+            report["sources"]["jobbank"] = _validate_jobbank(
+                max(jobbank_files, key=lambda path: path.stat().st_mtime)
             )
         report["sources"]["cost_of_living"] = _validate_cost_of_living(
             _latest("cost_of_living.json")

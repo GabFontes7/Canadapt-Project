@@ -229,6 +229,21 @@ def resolve_jooble_file_for_partition(
     return files[0] if files else None
 
 
+def resolve_jobbank_file_for_partition(
+    year_p: str,
+    month_p: str,
+    day_p: str,
+) -> Path | None:
+    """Return the latest Job Bank Bronze file for the Adzuna snapshot day."""
+    directory = BRONZE_ROOT / "jobbank" / year_p / month_p / day_p
+    files = sorted(
+        directory.glob("jobbank_raw_*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return files[0] if files else None
+
+
 def resolve_cost_of_living_file(preferred_day_dir: Path) -> Path:
     candidate = preferred_day_dir / "cost_of_living.json"
     if candidate.exists():
@@ -548,8 +563,8 @@ def normalize_adzuna_rows(path: Path, run_id: str) -> list[dict[str, Any]]:
                 "location_raw": (job.get("location") or {}).get("display_name"),
                 "category": (job.get("category") or {}).get("label"),
                 "focus_area": None,
-                "mobility_signals": [],
-                "filter_version": "adzuna_mobility_queries_v1",
+                "mobility_signals": job.get("canadapt_mobility_signals") or [],
+                "filter_version": job.get("canadapt_filter_version") or "adzuna_mobility_text_v2",
                 "job_type": None,
                 "description": job.get("description"),
                 "created": job.get("created"),
@@ -605,14 +620,90 @@ def normalize_jooble_rows(path: Path | None, run_id: str) -> list[dict[str, Any]
     return rows
 
 
+def _parse_jobbank_salary(salary_text: object) -> tuple[float | None, float | None]:
+    """Best-effort annualization of Job Bank salary strings."""
+    text = _clean_text(salary_text).lower().replace(",", "")
+    if not text:
+        return None, None
+    amounts = [float(match) for match in re.findall(r"\$?\s*(\d+(?:\.\d+)?)", text)]
+    if not amounts:
+        return None, None
+    low = amounts[0]
+    high = amounts[1] if len(amounts) > 1 else amounts[0]
+    if "hour" in text:
+        return low * 2080.0, high * 2080.0
+    if "week" in text:
+        return low * 52.0, high * 52.0
+    if "month" in text:
+        return low * 12.0, high * 12.0
+    if "year" in text or "annual" in text:
+        return low, high
+    # Ambiguous period — keep raw text only.
+    return None, None
+
+
+def _parse_jobbank_posted_date(value: object) -> str | None:
+    """Convert Job Bank dates like 'August 19, 2026' to ISO timestamps."""
+    text = _clean_text(value)
+    if not text:
+        return None
+    for fmt in ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            return parsed.strftime("%Y-%m-%dT00:00:00")
+        except ValueError:
+            continue
+    return None
+
+
+def normalize_jobbank_rows(path: Path | None, run_id: str) -> list[dict[str, Any]]:
+    if path is None:
+        return []
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    extracted_at = doc.get("extracted_at_utc")
+    rows: list[dict[str, Any]] = []
+    for job in (doc.get("payload") or {}).get("results") or []:
+        source_id = _clean_text(job.get("id"))
+        if not source_id:
+            continue
+        salary_min, salary_max = _parse_jobbank_salary(job.get("salary_text"))
+        rows.append(
+            {
+                "job_id": f"jobbank:{source_id}",
+                "source": "jobbank",
+                "source_job_id": source_id,
+                "source_site": "Job Bank",
+                "title": job.get("title"),
+                "company": job.get("company"),
+                "location_raw": job.get("location"),
+                "category": None,
+                "focus_area": None,
+                "mobility_signals": job.get("canadapt_mobility_signals") or [],
+                "filter_version": job.get("canadapt_filter_version")
+                or "jobbank_lmia_intl_v1",
+                "job_type": None,
+                "description": job.get("description"),
+                "created": _parse_jobbank_posted_date(job.get("posted_date")),
+                "redirect_url": job.get("url"),
+                "salary_raw": job.get("salary_text"),
+                "salary_min": salary_min,
+                "salary_max": salary_max,
+                "salary_is_predicted": False,
+                "noc_code": job.get("noc_code"),
+                "extracted_at_utc": extracted_at,
+                "pipeline_run_id": run_id,
+            }
+        )
+    return rows
+
+
 def merge_and_dedupe_job_rows(
-    adzuna_rows: list[dict[str, Any]],
-    jooble_rows: list[dict[str, Any]],
+    *row_groups: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Prefer the richer row when two sources expose the same listing."""
     selected: dict[str, dict[str, Any]] = {}
-    source_priority = {"adzuna": 2, "jooble": 1}
-    for row in adzuna_rows + jooble_rows:
+    source_priority = {"jobbank": 3, "adzuna": 2, "jooble": 1}
+    for row in [item for group in row_groups for item in group]:
         fingerprint = _dedupe_fingerprint(row)
         row["dedupe_fingerprint"] = fingerprint
         current = selected.get(fingerprint)
@@ -667,7 +758,7 @@ def build_multisource_jobs_clean_parquet(
             }
         )
     if not enriched:
-        raise RuntimeError("No valid Adzuna or Jooble jobs available for Silver.")
+        raise RuntimeError("No valid job rows available for Silver.")
 
     tmp = out_path.parent / "_multisource_jobs_tmp.json"
     try:
@@ -904,10 +995,12 @@ def main() -> int:
         adzuna_path = resolve_latest_adzuna_file()
         year_p, month_p, day_p = partition_segments_from_bronze_path(adzuna_path)
         jooble_path = resolve_jooble_file_for_partition(year_p, month_p, day_p)
+        jobbank_path = resolve_jobbank_file_for_partition(year_p, month_p, day_p)
         col_path = resolve_cost_of_living_file(adzuna_path.parent)
 
         logger.info("Bronze Adzuna: %s", adzuna_path)
         logger.info("Bronze Jooble: %s", jooble_path or "(not available)")
+        logger.info("Bronze Job Bank: %s", jobbank_path or "(not available)")
         logger.info("Bronze CoL: %s", col_path)
         logger.info("Silver partition: %s/%s/%s", year_p, month_p, day_p)
 
@@ -918,7 +1011,8 @@ def main() -> int:
         run_id = os.getenv("CANADAPT_RUN_ID", "").strip() or "local-manual"
         adzuna_rows = normalize_adzuna_rows(adzuna_path, run_id)
         jooble_rows = normalize_jooble_rows(jooble_path, run_id)
-        job_rows = merge_and_dedupe_job_rows(adzuna_rows, jooble_rows)
+        jobbank_rows = normalize_jobbank_rows(jobbank_path, run_id)
+        job_rows = merge_and_dedupe_job_rows(adzuna_rows, jooble_rows, jobbank_rows)
         distinct_terms = sorted(
             {
                 _clean_text(row.get("location_raw"))
@@ -964,9 +1058,10 @@ def main() -> int:
         )
         logger.info("Silver jobs local written | rows=%d | %s", jobs_n, jobs_local)
         logger.info(
-            "Silver source mix | adzuna=%d | jooble=%d | after_dedupe=%d",
+            "Silver source mix | adzuna=%d | jooble=%d | jobbank=%d | after_dedupe=%d",
             len(adzuna_rows),
             len(jooble_rows),
+            len(jobbank_rows),
             len(job_rows),
         )
         jobs_s3 = upload_file_to_s3(jobs_local, jobs_s3_key)

@@ -13,7 +13,6 @@ import os
 import re
 import sys
 import time
-from html import unescape
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,6 +23,13 @@ from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+from mobility_filter import (
+    JOOBLE_FILTER_VERSION,
+    has_negative_mobility,
+    mobility_signals,
+    plain_text,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BRONZE_ROOT = PROJECT_ROOT / "data" / "bronze" / "jooble"
@@ -63,42 +69,6 @@ BANKING_PATTERN = re.compile(
     r"fraud|credit operations?|loan operations?|payment operations?|"
     r"securities operations?|fund operations?|wealth operations?|"
     r"opérations bancaires|conformité|trésorerie)\b",
-    re.IGNORECASE,
-)
-MOBILITY_PATTERNS: dict[str, re.Pattern[str]] = {
-    "visa_sponsorship": re.compile(
-        r"\b(?:visa sponsorship|sponsor(?:ing|ship)? (?:a |the )?visa|"
-        r"work visa sponsorship|sponsorship available|parrainage de visa)\b",
-        re.IGNORECASE,
-    ),
-    "lmia": re.compile(r"\b(?:lmia|eimt)\b", re.IGNORECASE),
-    "relocation": re.compile(
-        r"\b(?:relocation (?:support|assistance|package) (?:to|for) canada|"
-        r"relocate to canada|international relocation|"
-        r"aide au déménagement (?:international|vers le canada))\b",
-        re.IGNORECASE,
-    ),
-    "work_permit": re.compile(
-        r"\b(?:work permit (?:support|sponsorship|provided)|"
-        r"support (?:for |with )?(?:a )?work permit|permis de travail)\b",
-        re.IGNORECASE,
-    ),
-}
-NEGATIVE_MOBILITY_PATTERN = re.compile(
-    r"\b(?:"
-    r"(?:visa )?sponsorship (?:is |will be )?not (?:available|offered|provided)|"
-    r"(?:do|does|will) not (?:offer|provide|support|sponsor)|"
-    r"(?:not|unable|not able) to (?:offer|provide|support|sponsor)|"
-    r"no (?:visa |work permit )?sponsorship|"
-    r"without (?:current or future )?(?:visa )?sponsorship|"
-    r"cannot sponsor|"
-    r"must (?:already )?be (?:legally )?(?:authorized|eligible) to work|"
-    r"(?:candidates? )?must be (?:a )?canadian "
-    r"(?:citizens?|residents?|permanent residents?)|"
-    r"only (?:canadian )?(?:citizens?|residents?|permanent residents?)|"
-    r"relocation (?:is )?not (?:available|offered|provided)|"
-    r"no relocation (?:assistance|support|package)"
-    r")\b",
     re.IGNORECASE,
 )
 
@@ -149,27 +119,14 @@ def classify_area(text: str) -> str | None:
     return None
 
 
-def plain_text(value: str) -> str:
-    """Remove Jooble highlight markup before applying semantic filters."""
-    without_tags = re.sub(r"<[^>]+>", " ", unescape(value or ""))
-    return re.sub(r"\s+", " ", without_tags).strip()
-
-
-def mobility_signals(text: str) -> list[str]:
-    """Extract explicit immigration/relocation evidence from listing text."""
-    return [
-        label for label, pattern in MOBILITY_PATTERNS.items() if pattern.search(text)
-    ]
-
-
 def filter_job(job: dict[str, Any], expected_area: str) -> dict[str, Any] | None:
     """Enforce both the professional-area and mobility contracts."""
-    text = plain_text(" ".join(
-        str(job.get(field) or "") for field in ("title", "snippet", "company", "type")
-    ))
+    text = plain_text(
+        " ".join(str(job.get(field) or "") for field in ("title", "snippet", "company", "type"))
+    )
     area = classify_area(text)
     signals = mobility_signals(text)
-    if area != expected_area or not signals or NEGATIVE_MOBILITY_PATTERN.search(text):
+    if area != expected_area or not signals or has_negative_mobility(text):
         return None
     if not job.get("id") or not job.get("title") or not job.get("link"):
         return None
@@ -177,7 +134,7 @@ def filter_job(job: dict[str, Any], expected_area: str) -> dict[str, Any] | None
         **job,
         "canadapt_area": area,
         "canadapt_mobility_signals": signals,
-        "canadapt_filter_version": "jooble_area_mobility_v1",
+        "canadapt_filter_version": JOOBLE_FILTER_VERSION,
     }
 
 
@@ -331,7 +288,7 @@ def main() -> int:
             "filter_contract": {
                 "allowed_areas": ["technology", "banking_operations"],
                 "mobility_required": True,
-                "version": "jooble_area_mobility_v1",
+                "version": JOOBLE_FILTER_VERSION,
             },
             "results_per_page": RESULTS_PER_PAGE,
             "requests_used": payload["requests_used"],

@@ -26,6 +26,8 @@ from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from mobility_filter import ADZUNA_FILTER_VERSION, filter_adzuna_job
+
 # -----------------------------------------------------------------------------
 # Config
 # -----------------------------------------------------------------------------
@@ -52,7 +54,7 @@ QUERY_SPECS: tuple[dict[str, Any], ...] = (
     {
         "label": "tech_mobilidade",
         "max_pages": 6,
-        "params": {"category": "it-jobs", "what_or": MOBILITY_WHAT_OR},
+        "params": {"category": "it-jobs", "what": SEARCH_WHAT, "what_or": MOBILITY_WHAT_OR},
     },
     # Same universe as tech_mobilidade, but ranked by relevance to "data" so the
     # data roles that fall outside the newest pages still get picked up.
@@ -314,14 +316,20 @@ def fetch_adzuna_jobs(
 
     unique: dict[str, dict[str, Any]] = {}
     fetched = 0
+    rejected_mobility = 0
     for block in blocks:
         for job in block["results"]:
             fetched += 1
             job_id = str(job.get("id") or "")
-            if not job_id or job_id in unique:
+            if not job_id:
                 continue
-            job["canadapt_query"] = block["label"]
-            unique[job_id] = job
+            filtered = filter_adzuna_job({**job, "canadapt_query": block["label"]})
+            if filtered is None:
+                rejected_mobility += 1
+                continue
+            if job_id in unique:
+                continue
+            unique[job_id] = filtered
 
     deduped = list(unique.values())
     if len(deduped) > MAX_JOBS_PER_RUN:
@@ -339,9 +347,10 @@ def fetch_adzuna_jobs(
         for block in blocks
     }
     logger.info(
-        "Fetch complete | queries=%d | fetched=%d | unique=%d | per_query=%s",
+        "Fetch complete | queries=%d | fetched=%d | rejected_mobility=%d | unique=%d | per_query=%s",
         len(blocks),
         fetched,
+        rejected_mobility,
         len(deduped),
         per_query,
     )
@@ -366,6 +375,7 @@ def fetch_adzuna_jobs(
         "api_count": sum(block["api_count"] for block in blocks),
         "pages_fetched": sum(block["pages_fetched"] for block in blocks),
         "results_fetched": fetched,
+        "results_rejected_mobility": rejected_mobility,
         "results_unique": len(deduped),
         "mean": blocks[0].get("mean"),
         "results": deduped,
@@ -479,6 +489,11 @@ def build_bronze_document(
         "country": "ca",
         "endpoint_template": ADZUNA_SEARCH_URL,
         "extracted_at_utc": extracted_at.isoformat(),
+        "filter_contract": {
+            "mobility_required": True,
+            "post_filter": "adzuna_mobility_text",
+            "version": ADZUNA_FILTER_VERSION,
+        },
         "max_days_old": MAX_DAYS_OLD,
         "what": SEARCH_WHAT,
         "what_or": SEARCH_WHAT_OR,

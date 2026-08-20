@@ -24,7 +24,7 @@ models:
 
               arguments:
 
-                values: [adzuna, jooble]
+                values: [adzuna, jooble, jobbank]
 
       - name: data_snapshot
 

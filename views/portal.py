@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import boto3
@@ -11,6 +12,14 @@ import pandas as pd
 import streamlit as st
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "src" / "ingestion") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src" / "ingestion"))
+from mobility_filter import (
+    mobility_confirmed,
+    mobility_signal_labels,
+    parse_mobility_signals,
+)
+
 GOLD_ROOT = ROOT / "data" / "gold" / "parquet"
 FCT_PATH = GOLD_ROOT / "fct_viabilidade_vagas" / "latest" / "fct_viabilidade_vagas.parquet"
 REMOTE_PATH = (
@@ -183,6 +192,43 @@ def local_da_vaga(row: pd.Series) -> str:
     return f"{str(cidade).title()}, {provincia}"
 
 
+def mobilidade_confirmada(row: pd.Series) -> bool:
+    return mobility_confirmed(row.get("sinais_mobilidade"))
+
+
+def rotulos_mobilidade(row: pd.Series) -> list[str]:
+    return mobility_signal_labels(row.get("sinais_mobilidade"))
+
+
+def badge_mobilidade(row: pd.Series) -> tuple[str, str] | None:
+    keys = set(parse_mobility_signals(row.get("sinais_mobilidade")))
+    if not keys:
+        return None
+    if "lmia_approved" in keys:
+        return "LMIA aprovado (Job Bank)", "green"
+    if "lmia_requested" in keys or (
+        "lmia" in keys and str(row.get("fonte_vaga") or "").casefold() == "jobbank"
+    ):
+        return "LMIA solicitado (Job Bank)", "green"
+    if "international_candidates" in keys:
+        return "Aberto a internacionais (Job Bank)", "green"
+    rotulos = rotulos_mobilidade(row)
+    rotulo = (
+        "Mobilidade confirmada"
+        if len(rotulos) <= 1
+        else "Mobilidade confirmada: " + ", ".join(rotulos)
+    )
+    return rotulo, "green"
+
+
+def apenas_busca_api(row: pd.Series) -> bool:
+    fonte = str(row.get("fonte_vaga") or "").casefold()
+    versao = str(row.get("versao_filtro_coleta") or "")
+    return fonte == "adzuna" and not mobilidade_confirmada(row) and (
+        not versao or versao.startswith("adzuna_mobility_queries")
+    )
+
+
 def render_vaga(row: pd.Series, *, contexto_remoto: str | None = None) -> None:
     titulo = str(row.get("titulo_cargo") or "Vaga sem título")
     empresa = str(row.get("empresa") or "Empresa não informada")
@@ -211,6 +257,12 @@ def render_vaga(row: pd.Series, *, contexto_remoto: str | None = None) -> None:
                 st.badge(viab_texto, color=viab_cor)
                 if row.get("confianca_calculo") is not None:
                     st.badge(conf_texto, color=conf_cor)
+                if mobilidade_confirmada(row):
+                    badge_texto, badge_cor = badge_mobilidade(row) or (
+                        "Mobilidade confirmada",
+                        "green",
+                    )
+                    st.badge(badge_texto, color=badge_cor, icon=":material/verified_user:")
                 st.badge(rotulo_area(row.get("familia_profissional")), color="gray")
                 if senioridade:
                     st.badge(senioridade, color="gray")
@@ -224,6 +276,13 @@ def render_vaga(row: pd.Series, *, contexto_remoto: str | None = None) -> None:
                     )
 
             st.caption(rotulo_origem_salario(row.get("origem_salario")))
+
+            if apenas_busca_api(row):
+                st.warning(
+                    "Esta vaga entrou só pela busca na API, sem menção explícita a "
+                    "patrocínio, LMIA ou relocação no texto do anúncio.",
+                    icon=":material/info:",
+                )
 
         with numeros:
             st.metric(
@@ -324,15 +383,16 @@ def render() -> None:
     with st.sidebar:
         st.subheader("Sobre o CanAdapt")
         st.caption(
-            "Cruzamos vagas canadenses que mencionam LMIA, patrocínio ou apoio a "
-            "relocação com impostos de 2026 e custo de vida por cidade."
+            "Cruzamos vagas canadenses do Job Bank (LMIA / internacionais) e de "
+            "agregadores que mencionam patrocínio ou relocação com impostos de 2026 "
+            "e custo de vida por cidade."
         )
         st.warning(
             "Todos os valores são estimativas. Não é aconselhamento financeiro, "
             "fiscal ou migratório.",
             icon=":material/warning:",
         )
-        st.caption("Fontes: Adzuna · ESDC · StatCan · CMHC")
+        st.caption("Fontes: Job Bank · Adzuna · Jooble · ESDC · StatCan · CMHC")
 
     with st.container(border=True):
         busca = st.text_input(
@@ -363,6 +423,14 @@ def render() -> None:
             format="CAD %d",
         )
         with st.container(horizontal=True, gap="medium"):
+            somente_mobilidade = st.toggle(
+                "Somente mobilidade confirmada",
+                value=True,
+                help=(
+                    "Mostra vagas cujo anúncio menciona patrocínio de visto, LMIA, "
+                    "relocação ou apoio à imigração."
+                ),
+            )
             ranking_seguro = st.toggle(
                 "Somente vagas de ranking confiável",
                 value=True,
@@ -393,6 +461,8 @@ def render() -> None:
 
     def aplicar_filtros_comuns(df: pd.DataFrame, *, coluna_ranking: str) -> pd.DataFrame:
         out = df.copy()
+        if somente_mobilidade and "sinais_mobilidade" in out.columns:
+            out = out[out.apply(mobilidade_confirmada, axis=1)]
         if ranking_seguro and coluna_ranking in out.columns:
             out = out[out[coluna_ranking] == True]  # noqa: E712
         elif not incluir_estimativas:
@@ -413,8 +483,8 @@ def render() -> None:
     def render_lista(df: pd.DataFrame, *, chave: str, contexto_remoto: str | None = None) -> None:
         if df.empty:
             st.info(
-                "Nenhuma vaga com esses filtros. Tente ampliar a busca ou desligar o "
-                "ranking confiável.",
+                "Nenhuma vaga com esses filtros. Tente ampliar a busca, desligar "
+                "'Somente mobilidade confirmada' ou o ranking confiável.",
                 icon=":material/search_off:",
             )
             return

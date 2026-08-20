@@ -2,7 +2,7 @@
 CanAdapt — orquestrador local / CI do pipeline Medalhão.
 
 Ordem:
-  1) ingestão Adzuna e Jooble (Bronze)
+  1) ingestão Adzuna, Jooble e Job Bank (Bronze)
   2) ingestão custo de vida (Bronze)
   3) ingestão de salários oficiais (Bronze)
   4) processamento Silver (vagas, custos e salários)
@@ -172,6 +172,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="CanAdapt weekly/local pipeline runner")
     parser.add_argument("--skip-adzuna", action="store_true", help="Pula ingestão Adzuna")
     parser.add_argument("--skip-jooble", action="store_true", help="Pula ingestão Jooble")
+    parser.add_argument("--skip-jobbank", action="store_true", help="Pula ingestão Job Bank")
     parser.add_argument("--skip-col", action="store_true", help="Pula ingestão de custo de vida")
     parser.add_argument("--skip-wages", action="store_true", help="Pula salários oficiais")
     parser.add_argument("--skip-silver", action="store_true", help="Pula processamento Silver")
@@ -208,6 +209,11 @@ def main() -> int:
         skip=args.skip_jooble,
     )
     _run(
+        "Ingestao Job Bank -> Bronze",
+        [python, "src/ingestion/ingest_jobbank.py"],
+        skip=args.skip_jobbank,
+    )
+    _run(
         "Ingestao custo de vida -> Bronze",
         [python, "src/ingestion/ingest_cost_of_living.py"],
         skip=args.skip_col,
@@ -223,6 +229,7 @@ def main() -> int:
         skip=(
             args.skip_adzuna
             and args.skip_jooble
+            and args.skip_jobbank
             and args.skip_col
             and args.skip_wages
         ),
