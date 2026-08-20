@@ -390,20 +390,6 @@ def render() -> None:
             )
         )
 
-    with st.sidebar:
-        st.subheader("Sobre o CanAdapt")
-        st.caption(
-            "Cruzamos vagas canadenses do Job Bank (LMIA / internacionais) e de "
-            "agregadores que mencionam patrocínio ou relocação com impostos de 2026 "
-            "e custo de vida por cidade."
-        )
-        st.warning(
-            "Todos os valores são estimativas. Não é aconselhamento financeiro, "
-            "fiscal ou migratório.",
-            icon=":material/warning:",
-        )
-        st.caption("Fontes: Job Bank · Adzuna · Jooble · ESDC · StatCan · CMHC")
-
     with st.container(border=True):
         busca = st.text_input(
             "Buscar vaga",

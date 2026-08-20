@@ -23,13 +23,13 @@ def _kpis() -> tuple[int | None, int | None, str | None]:
     return len(jobs), ranking, quando
 
 
-st.badge("Portal de decisão · Canadá", color="red", icon=":material/public:")
+st.badge("Vagas no Canadá com mobilidade", color="red", icon=":material/public:")
 hero, convite = st.columns([2.2, 1], vertical_alignment="center")
 with hero:
     st.title("🍁 CanAdapt")
     st.markdown(
-        "Vagas canadenses com sinal de **mobilidade** — visto, LMIA ou relocação — "
-        "e uma estimativa transparente do que pode **sobrar no fim do mês**."
+        "Encontre vagas canadenses abertas a quem precisa de **visto, LMIA ou relocação** "
+        "— e veja uma estimativa do que pode **sobrar no fim do mês** naquela cidade."
     )
 with convite:
     with st.container(border=True):
@@ -41,7 +41,7 @@ with convite:
             width="stretch",
         ):
             st.switch_page("app_pages/vagas.py")
-        st.caption("Abre o ranking da coleta atual.")
+        st.caption("Filtre por cidade, área e salário estimado.")
 
 vagas, ranking, atualizado = _kpis()
 k1, k2, k3 = st.columns(3)
@@ -52,70 +52,50 @@ k2.metric(
     border=True,
     help="Só entram anúncios com salário declarado e localização confiável.",
 )
-k3.metric("Última coleta", atualizado or "—", border=True)
+k3.metric("Última atualização", atualizado or "—", border=True)
 
 st.subheader("Para quem é")
 st.write(
-    "O CanAdapt ajuda quem avalia uma oferta ou uma busca de trabalho no "
-    "Canadá e precisa cruzar o anúncio com imposto, aluguel e custo de vida "
-    "da cidade — sem tratar o número como garantia oficial."
+    "Para quem está pesquisando trabalho no Canadá e quer ir além do anúncio: "
+    "saber se a vaga realmente sinaliza mobilidade e quanto pode sobrar depois de "
+    "imposto, aluguel e custo de vida da cidade."
 )
 
 c1, c2, c3 = st.columns(3)
 with c1:
     with st.container(border=True):
-        st.markdown("**:material/flight: Mobilidade**")
+        st.markdown("**:material/flight: Mobilidade em evidência**")
         st.caption(
-            "A coleta prioriza vagas que citam LMIA, patrocínio de visto "
-            "ou apoio a relocação internacional."
+            "Priorizamos Job Bank (LMIA / internacionais) e anúncios que citam "
+            "patrocínio de visto ou relocação."
         )
 with c2:
     with st.container(border=True):
         st.markdown("**:material/payments: Sobra mensal estimada**")
         st.caption(
-            "Do bruto ao líquido (faixas CRA 2026) e depois aluguel e "
-            "custo de vida CMHC/StatCan da cidade."
+            "Do bruto ao líquido (faixas de 2026) e depois aluguel e custo de vida "
+            "da cidade (CMHC / StatCan)."
         )
 with c3:
     with st.container(border=True):
         st.markdown("**:material/verified: Fontes à vista**")
         st.caption(
-            "Cada card mostra de onde veio o salário e links das bases "
-            "oficiais usadas no cálculo."
+            "Cada vaga mostra de onde veio o salário e links das bases usadas "
+            "no cálculo."
         )
 
-st.subheader("Como os dados chegam até aqui")
-b1, b2, b3 = st.columns(3)
-with b1:
-    with st.container(border=True):
-        st.markdown("**Bronze**")
-        st.caption(
-            "JSON/CSV bruto da semana, local e no S3, sem reescrever o passado."
-        )
-with b2:
-    with st.container(border=True):
-        st.markdown("**Silver**")
-        st.caption(
-            "Cidade padronizada, classificação NOC, salário pesquisado com fonte e caches."
-        )
-with b3:
-    with st.container(border=True):
-        st.markdown("**Gold**")
-        st.caption(
-            "dbt + DuckDB: viabilidade, ranking confiável e cenários remotos."
-        )
-
-st.subheader("O que você encontra no portal")
+st.subheader("O que você encontra")
 st.markdown(
     """
-    - **Vagas por cidade** — ranking pela sobra mensal estimada, com filtros de área e província.
-    - **Vagas remotas** — a vaga continua remota; você escolhe a cidade do cenário de custo.
-    - **Como calculamos** — ordem das fontes de salário, impostos e o glossário dos selos.
+    - **Vagas por cidade** — ordene pela sobra mensal estimada e filtre por área ou província.
+    - **Vagas remotas** — a vaga segue remota; você escolhe a cidade só para o cenário de custo.
+    - **Como calculamos** — de onde vem o salário, como entra o imposto e o que cada selo significa.
     """
 )
 
 st.subheader("Fontes")
 with st.container(horizontal=True, gap="small"):
+    st.badge("Job Bank", color="red")
     st.badge("Adzuna", color="red")
     st.badge("Jooble", color="red")
     st.badge("ESDC / NOC", color="blue")
@@ -128,11 +108,3 @@ st.warning(
     "financeiro, fiscal ou migratório, nem garante que a vaga patrocine o seu visto.",
     icon=":material/warning:",
 )
-
-with st.sidebar:
-    st.subheader("CanAdapt")
-    st.caption(
-        "Portal acadêmico de decisão para vagas no Canadá, com pipeline "
-        "semanal Bronze → Silver → Gold."
-    )
-    st.caption("Tema: vermelho Canadá · dados oficiais · estimativa explícita.")
